@@ -13,24 +13,16 @@ Using the same model to review its own work has blind spots. Fresh Eyes sends yo
 
 ## Installation
 
-Clone and copy to your personal skills directory:
-
-```bash
-git clone https://github.com/danshapiro/fresheyes.git
-cp -r fresheyes ~/.claude/skills/
 ```
-
-Or to add to a specific project:
-
-```bash
-cp -r fresheyes your-project/.claude/skills/
+/plugin marketplace add danshapiro/fresheyes
+/plugin install fresheyes@danshapiro-fresheyes
 ```
 
 ## Usage
 
 In Claude Code:
 
-- `run fresheyes` or `/fresheyes` - Review staged changes (or last commit if nothing staged)
+- `/fresheyes` - Review staged changes (or last commit if nothing staged)
 - `/fresheyes Review commit abc1234` - Review a specific commit
 - `/fresheyes Review the files in src/auth/` - Review specific files
 
