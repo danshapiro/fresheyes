@@ -11,14 +11,6 @@ if ! command -v codex &> /dev/null; then
   exit 1
 fi
 
-# Check for OpenAI API key
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  echo "Error: OPENAI_API_KEY environment variable not set." >&2
-  echo "Get your API key from https://platform.openai.com/api-keys" >&2
-  echo "Then: export OPENAI_API_KEY='your-key-here'" >&2
-  exit 1
-fi
-
 SCOPE_TEXT="${1:-Review the staged changes using git diff --cached. If nothing is staged, review the most recent commit using git show HEAD.}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
