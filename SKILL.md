@@ -37,7 +37,7 @@ The scope should be a clear, specific instruction telling the reviewer what to e
 Run the fresheyes script with the scope as the argument:
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/fresheyes/fresheyes.sh" "<scope from step 1>"
+~/.claude/skills/fresheyes/fresheyes.sh "<scope from step 1>"
 ```
 
 If no scope is provided, it defaults to reviewing staged changes or HEAD.
