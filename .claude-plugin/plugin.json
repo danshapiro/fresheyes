@@ -1,0 +1,12 @@
+{
+  "name": "fresheyes",
+  "version": "1.0.0",
+  "description": "Independent code review using a different, larger model for fresh perspective",
+  "author": {
+    "name": "Dan Shapiro",
+    "url": "https://github.com/danshapiro"
+  },
+  "repository": "https://github.com/danshapiro/fresheyes",
+  "license": "MIT",
+  "keywords": ["code-review", "fresh-eyes", "codex", "independent-review"]
+}
