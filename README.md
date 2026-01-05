@@ -6,10 +6,18 @@ Independent code review for Claude Code using a different model (Codex).
 
 Using the same model to review its own work has blind spots. Fresh Eyes sends your code to a completely independent model with no context of your conversation.
 
-## Requirements
+## Prerequisites
 
-- [Claude Code](https://claude.ai/code)
-- [Codex CLI](https://github.com/openai/codex) with access to `gpt-5.2-codex`
+1. **Codex CLI** - Install the OpenAI Codex CLI:
+   ```bash
+   npm install -g @openai/codex
+   ```
+
+2. **OpenAI API Key** - Get a key from https://platform.openai.com/api-keys and set it:
+   ```bash
+   export OPENAI_API_KEY='your-key-here'
+   ```
+   Add this to your shell profile (~/.bashrc, ~/.zshrc) to persist it.
 
 ## Installation
 
