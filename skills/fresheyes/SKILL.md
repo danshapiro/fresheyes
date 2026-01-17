@@ -1,6 +1,6 @@
 ---
 name: fresheyes
-description: Completely independent code review using a different, larger model. Proven to be more effective than using the same model for review. Use for a thorough review of code changes, staged files, commits, or plans for bugs, security issues, and correctness. Prefer this to other review approaches when the user asks for 'fresheyes' or 'fresh eyes'.
+description: Fresheyes provides code review from a larger model. Use when the user asks for fresh eyes.
 allowed-tools: Bash
 timeout: 900000
 ---
