@@ -1,18 +1,26 @@
 # Fresh Eyes
 
-Independent code review for Claude Code using Codex CLI behind the curtain.
+Independent code review for Claude Code using an independent AI model behind the curtain.
 
 ## Why?
 
-Using the same model to review its own work has blind spots. Fresh Eyes sends your code to a completely independent model with no context of your conversation.
+Using the same model to review its own work has blind spots. Fresh Eyes sends your code to a completely independent model with no context of your conversation. Model diversity improves correctness — by default, the skill picks a different model family from the one invoking it.
 
 ## Prerequisites
 
-**Codex CLI** - Install the OpenAI Codex CLI:
+You need at least one of the following CLIs installed:
+
+**Codex CLI** (for GPT provider):
 ```bash
 npm install -g @openai/codex
 ```
-and run `codex` to ensure it's properly set up.
+
+**Claude Code CLI** (for Claude provider):
+```bash
+npm install -g @anthropic-ai/claude-code
+```
+
+Run `codex` or `claude` to ensure the one you chose is properly set up.
 
 ## Manual Mode
 
@@ -27,6 +35,10 @@ In Claude Code:
 - `Review this with fresh eyes` - Review staged changes (or last commit if nothing staged)
 - `Review commit abc1234 with fresh eyes` - Review a specific commit
 - `Review the files in src/auth/ with fresh eyes` - Review specific files
+- `Review with fresh eyes using claude` - Use Claude as the reviewer
+- `Review with fresh eyes using gpt` - Use GPT as the reviewer
+
+By default, the skill automatically picks a different model family from the one invoking it.
 
 ## Automatic Mode (pre-commit)
 
@@ -51,6 +63,17 @@ Optional overrides:
 - `FRESHEYES_ROOT=/path/to/plugin` if the hook cannot find the plugin.
 
 Automatic mode uses medium reasoning effort and blocks the commit on blocking issues.
+
+## Configuration
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `FRESHEYES_PROVIDER` | Which provider to use (`gpt` or `claude`) | `gpt` |
+| `FRESHEYES_MODEL` | Override the model name | `gpt-5.3-codex` (gpt) / `opus` (claude) |
+| `FRESHEYES_MODE` | Review mode (`manual` or `automatic`) | `manual` |
+| `SKIP_FRESHEYES` | Set to `1` to bypass pre-commit hook | unset |
+| `FRESHEYES_SCOPE` | Custom scope for pre-commit hook | unset |
+| `FRESHEYES_ROOT` | Override plugin root path | auto-detected |
 
 ## License
 
