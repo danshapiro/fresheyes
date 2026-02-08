@@ -1,10 +1,10 @@
 # Fresh Eyes
 
-Independent code review for Claude Code using an independent AI model behind the curtain.
+Independent code review using a different AI model behind the curtain.
 
 ## Why?
 
-Using the same model to review its own work has blind spots. Fresh Eyes sends your code to a completely independent model with no context of your conversation. Model diversity improves correctness — by default, the skill picks a different model family from the one invoking it.
+Using the same model to review its own work has blind spots. Fresh Eyes sends your code to a completely independent model with zero context from your conversation — only the repo and the scope you give it. Model diversity improves correctness, so by default the skill picks a different model family from the one invoking it.
 
 ## Prerequisites
 
@@ -30,15 +30,18 @@ In Claude Code, run:
 /plugin install fresheyes@danshapiro-fresheyes
 ```
 
+**Important:** The reviewer only sees committed code. Commit your changes before invoking.
+
 In Claude Code:
 
 - `Review this with fresh eyes` - Review staged changes (or last commit if nothing staged)
 - `Review commit abc1234 with fresh eyes` - Review a specific commit
 - `Review the files in src/auth/ with fresh eyes` - Review specific files
+- `Do a security review of src/auth/ with fresh eyes` - Scoped review (user intent passed through faithfully)
 - `Review with fresh eyes using claude` - Use Claude as the reviewer
 - `Review with fresh eyes using gpt` - Use GPT as the reviewer
 
-By default, the skill automatically picks a different model family from the one invoking it.
+By default, the skill picks a different model family from the one invoking it. The reviewer operates independently — it receives only the scope you give it, with no conversation context.
 
 ## Automatic Mode (pre-commit)
 
