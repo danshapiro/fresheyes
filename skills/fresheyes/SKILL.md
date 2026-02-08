@@ -25,16 +25,19 @@ Default scope: "Review the staged changes using git diff --cached. If nothing is
 
 The scope should be a clear, specific instruction telling the reviewer what to examine. The reviewer has NO context from your conversation — only the repo and what you tell it.
 
+**The user's instructions are paramount.** If the user says "do a security review of src/auth/", pass that through faithfully — the scope becomes "Review the files in src/auth/ for security issues." Only when the user gives no specific focus should you leave the scope open-ended to preserve reviewer independence.
+
 **Good scope examples:**
 - `Review the staged changes using git diff --cached. If nothing is staged, review the most recent commit.`
 - `Review commit abc1234 using git show abc1234.`
 - `Review the files in src/auth/.`
+- `Review the files in src/auth/ for security issues.` (user explicitly asked for security review)
 - `Review the plan in docs/plans/2025-01-03-feature.md.`
 - `Review the changes between main and this branch using git diff main...HEAD.`
 
 **Bad scope examples:**
 - `check out what we just did` (reviewer has no context for "what we just did")
-- `review the files in src/auth/ for security issues` (NEVER describe what to look for — the reviewer's independence is the whole point)
+- `review src/auth/ for security issues` when the user just said "review src/auth/ with fresh eyes" (don't add your own focus — pass through what the user asked for)
 
 ### Step 3: Choose a provider
 
@@ -63,6 +66,6 @@ Output the review response exactly as returned.
 ## Common Mistakes
 
 - **Forgetting to commit** — The reviewer only sees committed code. Uncommitted changes are invisible.
-- **Biasing the reviewer** — Never include what to look for in the scope. "Review src/auth/ for security issues" defeats the purpose. Just say "Review src/auth/."
+- **Biasing the reviewer on your own initiative** — If the user just said "review src/auth/ with fresh eyes", don't editorialize the scope into "review src/auth/ for security issues." But if the user *asked* for a security review, pass that through faithfully.
 - **Vague scope** — "Check our recent work" means nothing to a reviewer with no conversation context. Be specific: which commits, files, or diffs.
 - **Including provider in scope** — "Review using claude the staged changes" passes "using claude" as scope text. Provider goes as a flag (`--claude`), not in the scope string.
