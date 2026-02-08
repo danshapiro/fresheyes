@@ -1,17 +1,21 @@
 ---
 name: fresheyes
-description: Fresheyes provides code review from an independent model. Use when the user asks for fresh eyes. Commit all changes before invoking - fresheyes uses git diff and only sees committed code.
+description: Use when the user asks for "fresh eyes", an independent review, or a second opinion on code, commits, plans, or files.
 allowed-tools: Bash
 timeout: 900000
 ---
 
 # Fresh Eyes - Independent Code Review
 
-Invoke an independent model to perform a code review.
+Invoke an independent model to perform a code review. The reviewer has zero context from your conversation — only the repo and the scope you give it.
 
 ## Instructions
 
-### Step 1: Determine the review scope
+### Step 1: Ensure changes are committed
+
+The reviewer uses git commands and only sees committed code. Before invoking, verify all relevant changes are committed. If not, commit them first (or tell the user uncommitted changes won't be reviewed).
+
+### Step 2: Determine the review scope
 
 {{#if args}}
 Use the provided scope: {{args}}
@@ -19,7 +23,7 @@ Use the provided scope: {{args}}
 Default scope: "Review the staged changes using git diff --cached. If nothing is staged, review the most recent commit using git show HEAD."
 {{/if}}
 
-The scope should be a clear, specific instruction telling the reviewer what to examine.
+The scope should be a clear, specific instruction telling the reviewer what to examine. The reviewer has NO context from your conversation — only the repo and what you tell it.
 
 **Good scope examples:**
 - `Review the staged changes using git diff --cached. If nothing is staged, review the most recent commit.`
@@ -29,25 +33,36 @@ The scope should be a clear, specific instruction telling the reviewer what to e
 - `Review the changes between main and this branch using git diff main...HEAD.`
 
 **Bad scope examples:**
-- `check out what we just did` (the reviewer has no context for what has happened other than the repo and what you tell it)
-- `review the files in src/auth/ for security issues` (NEVER describe what to look for - the reviewer has independence)
+- `check out what we just did` (reviewer has no context for "what we just did")
+- `review the files in src/auth/ for security issues` (NEVER describe what to look for — the reviewer's independence is the whole point)
 
-### Step 2: Choose a provider
+### Step 3: Choose a provider
 
-If the user does not specify a provider, default to a **different model family** from yourself — model diversity improves review quality. If you are a Claude model, use `--gpt`. If you are a GPT/Codex model, use `--claude`. If the user explicitly requests a provider (e.g. "review with fresh eyes using gpt", "use claude for the review"), honor that and pass `--gpt` or `--claude` accordingly. The provider keyword should NOT be included in the scope text — it controls which model runs the review, not what to review.
+Default to a **different model family** from yourself — model diversity improves review quality.
 
-### Step 3: Invoke the independent reviewer
+- **You are Claude** → use `--gpt`
+- **You are GPT/Codex** → use `--claude`
+- **User explicitly requests a provider** → honor it (`--gpt` or `--claude`)
 
-Run the fresheyes script with the provider flag and scope as arguments:
+The provider keyword controls which model runs the review. Do NOT include it in the scope text.
+
+### Step 4: Invoke the independent reviewer
 
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/fresheyes/fresheyes.sh" [--gpt|--claude] "<scope from step 1>"
+"${CLAUDE_PLUGIN_ROOT}/skills/fresheyes/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
 ```
 
 If no scope is provided, it defaults to reviewing staged changes or HEAD.
 
-**Timeout handling:** This skill has a 15-minute timeout. If the review times out, retry the command with a 30-minute timeout (1800000ms).
+**Timeout handling:** This skill has a 15-minute timeout. If the review times out, retry with a 30-minute timeout (1800000ms).
 
-### Step 4: Report results
+### Step 5: Report results
 
 Output the review response exactly as returned.
+
+## Common Mistakes
+
+- **Forgetting to commit** — The reviewer only sees committed code. Uncommitted changes are invisible.
+- **Biasing the reviewer** — Never include what to look for in the scope. "Review src/auth/ for security issues" defeats the purpose. Just say "Review src/auth/."
+- **Vague scope** — "Check our recent work" means nothing to a reviewer with no conversation context. Be specific: which commits, files, or diffs.
+- **Including provider in scope** — "Review using claude the staged changes" passes "using claude" as scope text. Provider goes as a flag (`--claude`), not in the scope string.
