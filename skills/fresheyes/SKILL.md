@@ -25,19 +25,20 @@ Default scope: "Review the staged changes using git diff --cached. If nothing is
 
 The scope should be a clear, specific instruction telling the reviewer what to examine. The reviewer has NO context from your conversation — only the repo and what you tell it.
 
-**The user's instructions are paramount.** If the user says "do a security review of src/auth/", pass that through faithfully — the scope becomes "Review the files in src/auth/ for security issues." Only when the user gives no specific focus should you leave the scope open-ended to preserve reviewer independence.
+**The user's instructions are paramount.** If the user says "do a security review of src/auth/", pass that through faithfully — the scope becomes "Review the files in src/auth/ for security issues." If the user does not scope the review, DO NOT PROVIDE INSTRUCTIONS THAT LIMIT THE SCOPE OF THE REVIEW. Do not use your judgment about what to review, only relay any opinions by the user, if any. Preserve reviewer independence; do not send instructions to the judge.
 
 **Good scope examples:**
-- `Review the staged changes using git diff --cached. If nothing is staged, review the most recent commit.`
+- `Review the staged changes using git diff --cached.`
 - `Review commit abc1234 using git show abc1234.`
 - `Review the files in src/auth/.`
 - `Review the files in src/auth/ for security issues.` (user explicitly asked for security review)
 - `Review the plan in docs/plans/2025-01-03-feature.md.`
 - `Review the changes between main and this branch using git diff main...HEAD.`
+- `Review the changes in the worktree at ../feature-worktree using git diff`
 
 **Bad scope examples:**
 - `check out what we just did` (reviewer has no context for "what we just did")
-- `review src/auth/ for security issues` when the user just said "review src/auth/ with fresh eyes" (don't add your own focus — pass through what the user asked for)
+- `review src/auth/ again; the buffer overflow has been fixed` (don't add your own context — either say nothing, or pass through what the user asked for)
 
 ### Step 3: Choose a provider
 
@@ -45,6 +46,7 @@ Default to a **different model family** from yourself — model diversity improv
 
 - **You are Claude** → use `--gpt`
 - **You are GPT/Codex** → use `--claude`
+- **You are neither** → use `--gpt`
 - **User explicitly requests a provider** → honor it (`--gpt` or `--claude`)
 
 The provider keyword controls which model runs the review. Do NOT include it in the scope text.
