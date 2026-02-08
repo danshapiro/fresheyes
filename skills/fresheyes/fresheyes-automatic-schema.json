@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "approve_commit": { "type": "boolean" },
+    "issues": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "severity": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": ["integer", "null"] },
+          "description": { "type": "string" }
+        },
+        "required": ["severity", "file", "line", "description"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["approve_commit", "issues"],
+  "additionalProperties": false
+}
