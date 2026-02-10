@@ -174,6 +174,7 @@ run_gpt_manual() {
     --sandbox read-only \
     --color never \
     --model "$MODEL" \
+    -c features.shell_snapshot=false \
     -c model_reasoning_effort="$REASONING_EFFORT" \
     "$PROMPT" 2>&1 | tee "$LOG_FILE" > /dev/null; then
     echo "Fresh Eyes: $PROVIDER_LABEL failed. See log: $LOG_FILE" >&2
@@ -190,6 +191,7 @@ run_gpt_automatic() {
     --sandbox read-only \
     --color never \
     --model "$MODEL" \
+    -c features.shell_snapshot=false \
     --output-schema "$SCHEMA_FILE" \
     -o "$output_file" \
     -c model_reasoning_effort="$REASONING_EFFORT" \
