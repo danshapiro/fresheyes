@@ -2,7 +2,7 @@
 name: fresheyes
 description: Use when the user asks for "fresh eyes", an independent review, or a second opinion on code, commits, plans, or files.
 allowed-tools: Bash
-timeout: 900000
+timeout: 1800000
 ---
 
 # Fresh Eyes - Independent Code Review

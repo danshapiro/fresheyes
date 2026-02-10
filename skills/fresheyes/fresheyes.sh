@@ -153,7 +153,7 @@ LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
 # needing to know the log path (which is large and would blow up the caller's context).
 echo "$LOG_FILE" > "$LOG_DIR/.active"
 
-echo "Fresh Eyes: review starting." >&2
+echo "Fresh Eyes: review starting. This may take up to 30 minutes, please wait patiently." >&2
 echo "To see the size of the response so far, invoke: $SCRIPT_DIR/fresheyes-progress.sh" >&2
 
 # --- Provider functions ---
