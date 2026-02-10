@@ -6,6 +6,11 @@ set -euo pipefail
 
 # --- Defaults ---
 PROVIDER=""
+# Two modes:
+#   manual    – thorough, human-readable markdown review (xhigh reasoning).
+#               Designed for interactive use: rich prose, full context, PASSED/FAILED verdict.
+#   automatic – fast, machine-readable JSON review (medium reasoning).
+#               Designed for pre-commit hooks: structured {approve_commit, issues[]} output.
 MODE="${FRESHEYES_MODE:-manual}"
 SCOPE_PARTS=()
 
@@ -144,7 +149,23 @@ LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
 
+# Mark this log as the active run so the progress helper can find it without the caller
+# needing to know the log path (which is large and would blow up the caller's context).
+echo "$LOG_FILE" > "$LOG_DIR/.active"
+
+echo "Fresh Eyes: review starting." >&2
+echo "To see the size of the response so far, invoke: $SCRIPT_DIR/fresheyes-progress.sh" >&2
+
 # --- Provider functions ---
+# Each provider (GPT/Codex, Claude) has a manual and automatic variant.
+#
+# Manual functions stream a free-form markdown review to stdout.
+#
+# Automatic functions write structured JSON to an output file.
+# The two providers handle structured output differently:
+#   GPT/Codex: --output-schema takes a file path; output is written directly in schema format.
+#   Claude:    --json-schema takes inline schema content; output is wrapped in a JSON envelope
+#              (under .structured_output), so we post-process to extract the inner object.
 
 CLAUDE_TOOLS='Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep'
 
@@ -154,7 +175,7 @@ run_gpt_manual() {
     --color never \
     --model "$MODEL" \
     -c model_reasoning_effort="$REASONING_EFFORT" \
-    "$PROMPT" > "$LOG_FILE" 2>&1; then
+    "$PROMPT" 2>&1 | tee "$LOG_FILE" > /dev/null; then
     echo "Fresh Eyes: $PROVIDER_LABEL failed. See log: $LOG_FILE" >&2
     exit 1
   fi
@@ -164,6 +185,7 @@ run_gpt_manual() {
 
 run_gpt_automatic() {
   local output_file="$1"
+  # Codex writes schema-conforming JSON directly to the output file — no post-processing needed.
   if ! codex exec \
     --sandbox read-only \
     --color never \
@@ -171,7 +193,7 @@ run_gpt_automatic() {
     --output-schema "$SCHEMA_FILE" \
     -o "$output_file" \
     -c model_reasoning_effort="$REASONING_EFFORT" \
-    "$PROMPT" > "$LOG_FILE" 2>&1; then
+    "$PROMPT" 2>&1 | tee "$LOG_FILE" > /dev/null; then
     echo "Fresh Eyes: $PROVIDER_LABEL failed. Commit blocked." >&2
     echo "Full log: $LOG_FILE" >&2
     exit 1
@@ -193,6 +215,7 @@ run_claude_manual() {
 
 run_claude_automatic() {
   local output_file="$1"
+  # Claude CLI takes schema contents inline (not a file path like Codex).
   local json_schema
   json_schema=$(cat "$SCHEMA_FILE")
 

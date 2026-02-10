@@ -48,6 +48,16 @@ Rate each issue:
 - **minor**: Code quality issues, potential edge cases
 - **nit**: Style, naming, minor improvements
 
+### Unable to Review
+
+If you cannot perform the review, you MUST fail. Examples:
+- No changes found (no staged changes, empty diff, no commit to review)
+- Referenced files are missing or unreadable
+- The scope description doesn't match anything in the repository
+- Any other condition that prevents a meaningful review
+
+Do not pass a review you could not actually perform.
+
 ### Blocking Decision
 
 Decide whether there are blocking issues. **Anything that isn't cosmetic or a nit is blocking.** A mismatch between the commit message and the actual changes IS a blocking issue.

@@ -24,6 +24,15 @@ Review for ANYTHING that is wrong. This includes but is not limited to:
 - Missing or obviously wrong tests
 - Code that doesn't match its stated purpose
 
+### Unable to Review
+
+If you cannot perform the review, set approve_commit to false and report a single critical issue explaining why. Examples:
+- No staged changes found (empty diff)
+- Referenced files are missing or unreadable
+- Any other condition that prevents a meaningful review
+
+Do not approve a review you could not actually perform.
+
 ### Approval Decision
 
 Decide whether to approve this commit. If any issue is more than a nit, approval must be false.
