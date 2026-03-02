@@ -32,6 +32,10 @@ In Claude Code, run:
 
 **Important:** The reviewer only sees committed code. Commit your changes before invoking.
 
+Runner entrypoints:
+- Unix-like shells: `skills/fresheyes/fresheyes.sh`
+- Windows PowerShell: `skills/fresheyes/fresheyes.ps1`
+
 In Claude Code:
 
 - `Review this with fresh eyes` - Review staged changes (or last commit if nothing staged)
@@ -42,6 +46,18 @@ In Claude Code:
 - `Review with fresh eyes using gpt` - Use GPT as the reviewer
 
 By default, the skill picks a different model family from the one invoking it. The reviewer operates independently — it receives only the scope you give it, with no conversation context.
+
+### Running outside Claude Code
+
+Unix/macOS:
+```bash
+bash skills/fresheyes/fresheyes.sh --gpt "Review the changes between main and HEAD using git diff main...HEAD."
+```
+
+PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\skills\fresheyes\fresheyes.ps1 --gpt "Review the changes between main and HEAD using git diff main...HEAD."
+```
 
 ## Automatic Mode (pre-commit)
 
