@@ -53,8 +53,14 @@ The provider keyword controls which model runs the review. Do NOT include it in 
 
 ### Step 4: Invoke the independent reviewer
 
+On Unix-like shells:
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/skills/fresheyes/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
+```
+
+On Windows PowerShell:
+```powershell
+powershell -ExecutionPolicy Bypass -File "${CLAUDE_PLUGIN_ROOT}\skills\fresheyes\fresheyes.ps1" [--gpt|--claude] "<scope from step 2>"
 ```
 
 If no scope is provided, it defaults to reviewing staged changes or HEAD.
