@@ -203,7 +203,7 @@ run_gpt_automatic() {
 }
 
 run_claude_manual() {
-  if ! env -u ANTHROPIC_API_KEY claude -p \
+  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
     --model "$MODEL" \
     --output-format text \
     --allowedTools "$CLAUDE_TOOLS" \
@@ -221,7 +221,7 @@ run_claude_automatic() {
   local json_schema
   json_schema=$(cat "$SCHEMA_FILE")
 
-  if ! env -u ANTHROPIC_API_KEY claude -p \
+  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
     --model "$MODEL" \
     --output-format json \
     --json-schema "$json_schema" \
