@@ -51,13 +51,19 @@ Default to a **different model family** from yourself — model diversity improv
 
 The provider keyword controls which model runs the review. Do NOT include it in the scope text.
 
+If the model you chose throws an error, try another. If that also throws an error, stop and ask the user what to do. DO NOT CONTINUE IF YOU CANNOT FOLLOW THESE INSTRUCTIONS.
+
 ### Step 4: Invoke the independent reviewer
 
+The script path is `fresheyes.sh` inside this skill's base directory (shown at the top of these instructions).
+
 ```bash
-"${CLAUDE_PLUGIN_ROOT}/skills/fresheyes/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
+bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
 ```
 
 If no scope is provided, it defaults to reviewing staged changes or HEAD.
+
+**Caller status check:** Poll once per minute with `bash "<base-directory>/fresheyes-progress.sh"`; if the returned line count increases between polls, the review is still progressing.
 
 **Timeout handling:** This skill has a 15-minute timeout. If the review times out, retry with a 30-minute timeout (1800000ms).
 
@@ -71,3 +77,5 @@ Output the review response exactly as returned.
 - **Biasing the reviewer on your own initiative** — If the user just said "review src/auth/ with fresh eyes", don't editorialize the scope into "review src/auth/ for security issues." But if the user *asked* for a security review, pass that through faithfully.
 - **Vague scope** — "Check our recent work" means nothing to a reviewer with no conversation context. Be specific: which commits, files, or diffs.
 - **Including provider in scope** — "Review using claude the staged changes" passes "using claude" as scope text. Provider goes as a flag (`--claude`), not in the scope string.
+- **Not waiting** - Always wait until the timeout.
+- **Doing it yourself** - either use the process here, or notify the user. Do not try a different approach.
