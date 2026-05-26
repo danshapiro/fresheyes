@@ -57,15 +57,17 @@ If the model you chose throws an error, try another. If that also throws an erro
 
 The script path is `fresheyes.sh` inside this skill's base directory (shown at the top of these instructions).
 
-Run it in the background and capture its PID via `$!`:
+Launch it in a new session (so it survives if the harness kills this call) and capture its PID:
 
 ```bash
-bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" &
+setsid bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" </dev/null >/dev/null 2>/dev/null &
 FRESHPID=$!
 echo "FRESHPID=$FRESHPID"
 ```
 
-Save `$FRESHPID`. This is your handle for the entire review lifecycle. You will never see or touch the log file — the progress script mediates all access.
+`setsid` detaches the review from this call's process group so harness timeouts don't kill it. All output is written to the log file — you interact only through `fresheyes-progress.sh` and `kill -0`.
+
+Save `$FRESHPID`. This is your handle for the entire review lifecycle.
 
 ### Step 5: Poll every 2 minutes
 
