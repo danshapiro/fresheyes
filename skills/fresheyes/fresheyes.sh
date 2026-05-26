@@ -149,12 +149,16 @@ LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
 
-# Mark this log as the active run so the progress helper can find it without the caller
-# needing to know the log path (which is large and would blow up the caller's context).
-echo "$LOG_FILE" > "$LOG_DIR/.active"
+echo "$LOG_FILE" > "$LOG_DIR/.active.$$"
 
-echo "Fresh Eyes: review starting. This may take up to 30 minutes, please wait patiently." >&2
-echo "To see the size of the response so far, invoke: $SCRIPT_DIR/fresheyes-progress.sh" >&2
+_cleanup() {
+  rm -f "$LOG_DIR/.active.$$"
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  wait "$HEARTBEAT_PID" 2>/dev/null || true
+}
+trap _cleanup EXIT
+
+echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please wait patiently." >&2
 
 # --- Provider functions ---
 # Each provider (GPT/Codex, Claude) has a manual and automatic variant.
@@ -245,7 +249,26 @@ with open(sys.argv[2], 'w') as f:
 " "$LOG_FILE" "$output_file"
 }
 
+# --- Heartbeat ---
+# Keeps the harness from killing this process during long, silent reviews.
+_start_heartbeat() {
+  (
+    while true; do
+      sleep 300
+      echo "Fresh Eyes [$$]: review in progress..." >&2
+    done
+  ) &
+  HEARTBEAT_PID=$!
+}
+
+_stop_heartbeat() {
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  wait "$HEARTBEAT_PID" 2>/dev/null || true
+}
+
 # --- Dispatch ---
+
+_start_heartbeat
 
 if [[ "$MODE" == "automatic" ]]; then
   OUTPUT_FILE="$LOG_DIR/fresheyes-automatic-$(date +%Y%m%d-%H%M%S)-$$.json"

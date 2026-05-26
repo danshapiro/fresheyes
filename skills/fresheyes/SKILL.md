@@ -53,23 +53,65 @@ The provider keyword controls which model runs the review. Do NOT include it in 
 
 If the model you chose throws an error, try another. If that also throws an error, stop and ask the user what to do. DO NOT CONTINUE IF YOU CANNOT FOLLOW THESE INSTRUCTIONS.
 
-### Step 4: Invoke the independent reviewer
+### Step 4: Launch the reviewer in background
 
 The script path is `fresheyes.sh` inside this skill's base directory (shown at the top of these instructions).
 
+Run it in the background and capture its PID via `$!`:
+
 ```bash
-bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
+bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" &
+FRESHPID=$!
+echo "FRESHPID=$FRESHPID"
 ```
 
-If no scope is provided, it defaults to reviewing staged changes or HEAD.
+Save `$FRESHPID`. This is your handle for the entire review lifecycle. You will never see or touch the log file — the progress script mediates all access.
 
-**Caller status check:** Poll once per minute with `bash "<base-directory>/fresheyes-progress.sh"`; if the returned line count increases between polls, the review is still progressing.
+### Step 5: Poll every 2 minutes
 
-**Timeout handling:** This skill has a 15-minute timeout. If the review times out, retry with a 30-minute timeout (1800000ms).
+Every 120 seconds, run ONE bash call that checks liveness and progress:
 
-### Step 5: Report results
+```bash
+# Liveness check
+if kill -0 FRESHPID 2>/dev/null; then
+  echo "alive"
+else
+  wait FRESHPID 2>/dev/null
+  echo "dead EXIT=$?"
+fi
+# Progress / results (line count if alive, full review if dead)
+bash "<base-directory>/fresheyes-progress.sh" FRESHPID
+```
+
+The output is:
+
+**While the review is running:**
+```
+alive
+5270        ← line count from fresheyes-progress.sh
+```
+
+**When the review has finished (success or crash):**
+```
+dead EXIT=0   ← 0 = success, non-zero = failure
+[full review text from fresheyes-progress.sh]
+```
+
+### Step 6: Interpret and act
+
+- **`alive` + line count growing** → review is progressing. Keep polling every 2 minutes.
+- **`alive` + line count unchanged for 3 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill FRESHPID`) and report the partial results from the progress script.
+- **`dead EXIT=0`** → review completed successfully. The text following `dead EXIT=0` is the review. Proceed to Step 7.
+- **`dead EXIT=non-zero`** → review failed (error, crash, no scope match). The text following the exit line describes what went wrong. Report the failure.
+- **`FRESHPID` is empty or `fresheyes-progress.sh` returns only `0`** → the review never started. The launch likely failed silently. Check stderr from the launch call.
+
+### Step 7: Report results
 
 Output the review response exactly as returned.
+
+## Parallel reviews
+
+Multiple fresheyes reviews can run simultaneously. Each invocation gets its own PID and its own `.active.$PID` file — they never collide. To run two reviews in parallel, save each `FRESHPID` under a distinct variable and poll them separately.
 
 ## Common Mistakes
 
@@ -77,5 +119,6 @@ Output the review response exactly as returned.
 - **Biasing the reviewer on your own initiative** — If the user just said "review src/auth/ with fresh eyes", don't editorialize the scope into "review src/auth/ for security issues." But if the user *asked* for a security review, pass that through faithfully.
 - **Vague scope** — "Check our recent work" means nothing to a reviewer with no conversation context. Be specific: which commits, files, or diffs.
 - **Including provider in scope** — "Review using claude the staged changes" passes "using claude" as scope text. Provider goes as a flag (`--claude`), not in the scope string.
-- **Not waiting** - Always wait until the timeout.
-- **Doing it yourself** - either use the process here, or notify the user. Do not try a different approach.
+- **Not polling** — The review takes 5-30 minutes. You must poll every 2 minutes until it completes.
+- **Doing it yourself** — either use the process here, or notify the user. Do not try a different approach.
+- **Opening the log** — Do not read, cat, tail, or grep the log file. Interact only through fresheyes-progress.sh and kill -0.
