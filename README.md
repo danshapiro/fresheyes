@@ -72,7 +72,7 @@ Automatic mode uses medium reasoning effort and blocks the commit on blocking is
 | Environment Variable | Description | Default |
 |---|---|---|
 | `FRESHEYES_PROVIDER` | Which provider to use (`gpt` or `claude`) | `gpt` |
-| `FRESHEYES_MODEL` | Override the model name | `gpt-5.3-codex` (gpt) / `opus` (claude) |
+| `FRESHEYES_MODEL` | Override the model name | `gpt-5.5` (gpt) / `opus` (claude) |
 | `FRESHEYES_MODE` | Review mode (`manual` or `automatic`) | `manual` |
 | `SKIP_FRESHEYES` | Set to `1` to bypass pre-commit hook | unset |
 | `FRESHEYES_SCOPE` | Custom scope for pre-commit hook | unset |

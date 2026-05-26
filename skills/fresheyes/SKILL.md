@@ -60,12 +60,12 @@ The script path is `fresheyes.sh` inside this skill's base directory (shown at t
 Launch it in a new session (so it survives if the harness kills this call) and capture its PID:
 
 ```bash
-setsid bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" </dev/null >/dev/null &
+setsid bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" </dev/null >/dev/null 2>/dev/null &
 FRESHPID=$!
 echo "FRESHPID=$FRESHPID"
 ```
 
-`setsid` detaches the review from this call's process group so harness timeouts don't kill it. Review output and errors are written to the log file accessible via `fresheyes-progress.sh`. Startup messages and the heartbeat appear on stderr.
+`setsid` detaches the review from this call's process group so harness timeouts don't kill it. All output is written to the log file accessible via `fresheyes-progress.sh`. Startup messages and the heartbeat are captured in the log.
 
 Save `$FRESHPID`. This is your handle for the entire review lifecycle.
 
@@ -103,7 +103,7 @@ Note: `setsid` detaches the process from the shell's job control, so `wait` is u
 ### Step 6: Interpret and act
 
 - **`alive` + line count growing** → review is progressing. Keep polling every 2 minutes.
-- **`alive` + line count unchanged for 3 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill FRESHPID`) and report partial results.
+- **`alive` + line count unchanged for 3 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill $FRESHPID`) and report partial results.
 - **`dead` + review text** → review completed. The text is the review. Proceed to Step 7.
 - **`dead` + `0` only** → the review never started or crashed before producing output. Check for a log file directly with `ls "/tmp/fresheyes-logs/fresheyes-*-$FRESHPID.log"` and read the last lines for an error message.
 
