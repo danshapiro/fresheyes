@@ -60,12 +60,12 @@ The script path is `fresheyes.sh` inside this skill's base directory (shown at t
 Launch it in a new session (so it survives if the harness kills this call) and capture its PID:
 
 ```bash
-setsid bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" </dev/null >/dev/null 2>/dev/null &
+setsid bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" </dev/null >/dev/null &
 FRESHPID=$!
 echo "FRESHPID=$FRESHPID"
 ```
 
-`setsid` detaches the review from this call's process group so harness timeouts don't kill it. All output is written to the log file — you interact only through `fresheyes-progress.sh` and `kill -0`.
+`setsid` detaches the review from this call's process group so harness timeouts don't kill it. Review output and errors are written to the log file accessible via `fresheyes-progress.sh`. Startup messages and the heartbeat appear on stderr.
 
 Save `$FRESHPID`. This is your handle for the entire review lifecycle.
 
@@ -75,14 +75,13 @@ Every 120 seconds, run ONE bash call that checks liveness and progress:
 
 ```bash
 # Liveness check
-if kill -0 FRESHPID 2>/dev/null; then
+if kill -0 $FRESHPID 2>/dev/null; then
   echo "alive"
 else
-  wait FRESHPID 2>/dev/null
-  echo "dead EXIT=$?"
+  echo "dead"
 fi
 # Progress / results (line count if alive, full review if dead)
-bash "<base-directory>/fresheyes-progress.sh" FRESHPID
+bash "<base-directory>/fresheyes-progress.sh" $FRESHPID
 ```
 
 The output is:
@@ -95,17 +94,18 @@ alive
 
 **When the review has finished (success or crash):**
 ```
-dead EXIT=0   ← 0 = success, non-zero = failure
+dead
 [full review text from fresheyes-progress.sh]
 ```
+
+Note: `setsid` detaches the process from the shell's job control, so `wait` is unreliable. Rely on `kill -0` for liveness and the progress script for results.
 
 ### Step 6: Interpret and act
 
 - **`alive` + line count growing** → review is progressing. Keep polling every 2 minutes.
-- **`alive` + line count unchanged for 3 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill FRESHPID`) and report the partial results from the progress script.
-- **`dead EXIT=0`** → review completed successfully. The text following `dead EXIT=0` is the review. Proceed to Step 7.
-- **`dead EXIT=non-zero`** → review failed (error, crash, no scope match). The text following the exit line describes what went wrong. Report the failure.
-- **`FRESHPID` is empty or `fresheyes-progress.sh` returns only `0`** → the review never started. The launch likely failed silently. Check stderr from the launch call.
+- **`alive` + line count unchanged for 3 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill FRESHPID`) and report partial results.
+- **`dead` + review text** → review completed. The text is the review. Proceed to Step 7.
+- **`dead` + `0` only** → the review never started or crashed before producing output. Check for a log file directly with `ls "/tmp/fresheyes-logs/fresheyes-*-$FRESHPID.log"` and read the last lines for an error message.
 
 ### Step 7: Report results
 
