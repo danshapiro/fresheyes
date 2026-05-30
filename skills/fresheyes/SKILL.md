@@ -103,7 +103,7 @@ Note: `setsid` detaches the process from the shell's job control, so `wait` is u
 ### Step 6: Interpret and act
 
 - **`alive` + line count growing** → review is progressing. Keep polling every 2 minutes.
-- **`alive` + line count unchanged for 3 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill $FRESHPID`) and report partial results.
+- **`alive` + line count unchanged for 15 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill $FRESHPID`) and report partial results.
 - **`dead` + review text** → review completed. The text is the review. Proceed to Step 7.
 - **`dead` + `0` only** → the review never started or crashed before producing output. Check for a log file directly with `ls "/tmp/fresheyes-logs/fresheyes-*-$FRESHPID.log"` and read the last lines for an error message.
 
