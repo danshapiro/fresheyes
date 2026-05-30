@@ -209,6 +209,7 @@ run_gpt_automatic() {
 run_claude_manual() {
   if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
     --model "$MODEL" \
+    --effort "$REASONING_EFFORT" \
     --output-format text \
     --allowedTools "$CLAUDE_TOOLS" \
     --dangerously-skip-permissions \
@@ -227,6 +228,7 @@ run_claude_automatic() {
 
   if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
     --model "$MODEL" \
+    --effort "$REASONING_EFFORT" \
     --output-format json \
     --json-schema "$json_schema" \
     --allowedTools "$CLAUDE_TOOLS" \
