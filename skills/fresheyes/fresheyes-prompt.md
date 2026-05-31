@@ -15,6 +15,7 @@ Do not invoke or load any skills, plugins, subprocess reviewers, secondary agent
 - Err on the side of more research rather than less
 - Any time you see an open question, go back and research further
 - You may search the web for documentation, substantiation, or any other purpose
+- Shell commands must be bounded. Use `timeout 300s` around any command that could take a while.
 - Do NOT modify files
 - Do NOT run git commit/push/rebase, change branches, or apply patches
 
