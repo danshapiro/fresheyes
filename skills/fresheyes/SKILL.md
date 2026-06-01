@@ -65,7 +65,7 @@ FRESHPID=$!
 echo "FRESHPID=$FRESHPID"
 ```
 
-`setsid` detaches the review from this call's process group so harness timeouts don't kill it. All output is written to the log file accessible via `fresheyes-progress.sh`. Startup messages and the heartbeat are captured in the log.
+`setsid` detaches the review from this call's process group so harness timeouts don't kill it. Review output and progress are accessible through `fresheyes-progress.sh`; Claude provider progress is tracked in structured sidecar logs.
 
 Save `$FRESHPID`. This is your handle for the entire review lifecycle.
 
@@ -80,16 +80,22 @@ if kill -0 $FRESHPID 2>/dev/null; then
 else
   echo "dead"
 fi
-# Progress / results (line count if alive, full review if dead)
+# Progress / results (provider status or line count if alive, full review or diagnostic if dead)
 bash "<base-directory>/fresheyes-progress.sh" $FRESHPID
 ```
 
 The output is:
 
-**While the review is running:**
+**While a Claude-provider review is running:**
 ```
 alive
-5270        ← line count from fresheyes-progress.sh
+running provider=claude provider_events=42 last_provider_event=tool_result final_lines=0
+```
+
+**While a GPT or legacy review is running:**
+```
+alive
+5270
 ```
 
 **When the review has finished (success or crash):**
@@ -102,10 +108,17 @@ Note: `setsid` detaches the process from the shell's job control, so `wait` is u
 
 ### Step 6: Interpret and act
 
-- **`alive` + line count growing** → review is progressing. Keep polling every 2 minutes.
-- **`alive` + line count unchanged for 15 consecutive polls** → review may be stalled. Poll one more cycle. If still stalled, kill the process (`kill $FRESHPID`) and report partial results.
+- **`alive` + `running provider=claude ...`** → the Claude provider is active. `provider_events` counts model-originated stream events; wrapper heartbeats are not counted.
+- **`alive` + numeric output** → GPT or legacy progress. A growing count means output is increasing.
 - **`dead` + review text** → review completed. The text is the review. Proceed to Step 7.
-- **`dead` + `0` only** → the review never started or crashed before producing output. Check for a log file directly with `ls "/tmp/fresheyes-logs/fresheyes-*-$FRESHPID.log"` and read the last lines for an error message.
+- **`dead` + diagnostic text** → the provider crashed before final output. Report the diagnostic text as returned.
+- **`dead` + `0` only** → the review never started or no tracked output existed. Report that no review output was available.
+
+If you must stop a review, clean up the process group first and fall back to the wrapper PID:
+
+```bash
+kill -- -$FRESHPID 2>/dev/null || kill $FRESHPID 2>/dev/null || true
+```
 
 ### Step 7: Report results
 
