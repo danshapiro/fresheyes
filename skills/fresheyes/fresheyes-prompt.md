@@ -40,6 +40,16 @@ Focus on finding the most severe problems you can - the more 'critical' and 'maj
 - Look for stray files that might be included that shouldn't have been
 - A vague commit message (e.g., "fix bug") without detail is a major issue
 
+### Implementation Plans and Runbooks
+
+When reviewing a plan, runbook, proposed patch sequence, test design, or docs change that tells another agent how to implement or verify work:
+
+- Treat it as executable behavior, not prose-only documentation.
+- A step that would fail as written, makes a later `Expected: PASS` unachievable, references missing variables/files/artifacts, contradicts current repository behavior, or has a command/assertion mismatch is at least **major** and blocking.
+- A proposed test or verifier that would fail for the wrong reason, pass vacuously, or fail to check the property it claims to prove is at least **major** and blocking when the plan relies on it as a verification gate.
+- Do not downgrade an executable plan defect because TDD, CI, a future implementer, or a careful reader might notice and fix it later.
+- Passing a plan review is appropriate only when remaining issues are optional refinements that do not change whether the plan can be executed and verified as written.
+
 ### Related Tests
 
 Using static analysis only (do NOT run tests), determine:
@@ -52,7 +62,7 @@ Using static analysis only (do NOT run tests), determine:
 
 Rate each issue:
 - **critical**: Security vulnerabilities, data loss, crashes
-- **major**: Bugs, significant logic errors, missing error handling
+- **major**: Bugs, significant logic errors, missing error handling, or executable plan/test steps that cannot pass as written
 - **minor**: Code quality issues, potential edge cases
 - **nit**: Style, naming, minor improvements
 
