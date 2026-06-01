@@ -8,6 +8,7 @@
 #              log or a concise diagnostic assembled from sidecar logs.
 
 LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
+GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 PID="${1:-}"
 
 _base_from_related_path() {
@@ -25,26 +26,67 @@ _related_file_exists() {
   [[ -f "$base" || -f "$base.events.jsonl" || -f "$base.stream.jsonl" || -f "$base.stderr" ]]
 }
 
-_find_base_for_pid() {
-  local pid="$1"
-  local active_file="$LOG_DIR/.active.$pid"
-  if [[ -f "$active_file" ]]; then
-    local active_path
-    active_path=$(cat "$active_file" 2>/dev/null)
-    if [[ -n "$active_path" ]] && _related_file_exists "$active_path"; then
-      printf '%s\n' "$active_path"
+_pid_from_base() {
+  local base="$1"
+  local name="${base##*/}"
+  if [[ "$name" =~ -([0-9]+)\.log$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
+_tracker_path() {
+  local tracker_file="$1"
+  if [[ ! -f "$tracker_file" ]]; then
+    return 1
+  fi
+
+  local tracked_path
+  tracked_path=$(cat "$tracker_file" 2>/dev/null)
+  if [[ -z "$tracked_path" ]]; then
+    return 1
+  fi
+  _base_from_related_path "$tracked_path"
+}
+
+_find_base_for_pid_in_dir() {
+  local dir="$1"
+  local pid="$2"
+  local tracker_file
+  local tracked_path
+  local matches=()
+  local newest
+
+  for tracker_file in "$dir/.active.$pid" "$dir/.locator.$pid"; do
+    if tracked_path=$(_tracker_path "$tracker_file"); then
+      if _related_file_exists "$tracked_path"; then
+        printf '%s\n' "$tracked_path"
+        return 0
+      fi
+      case "$tracker_file" in
+        "$dir/.locator.$pid")
+          printf '%s\n' "$tracked_path"
+          return 0
+          ;;
+      esac
+    fi
+  done
+
+  if ! kill -0 "$pid" 2>/dev/null; then
+    tracker_file="$dir/.parent.$pid"
+    if tracked_path=$(_tracker_path "$tracker_file"); then
+      printf '%s\n' "$tracked_path"
       return 0
     fi
   fi
 
-  local matches=()
-  local newest
   shopt -s nullglob
   matches=(
-    "$LOG_DIR"/fresheyes-*-"$pid".log
-    "$LOG_DIR"/fresheyes-*-"$pid".log.events.jsonl
-    "$LOG_DIR"/fresheyes-*-"$pid".log.stream.jsonl
-    "$LOG_DIR"/fresheyes-*-"$pid".log.stderr
+    "$dir"/fresheyes-*-"$pid".log
+    "$dir"/fresheyes-*-"$pid".log.events.jsonl
+    "$dir"/fresheyes-*-"$pid".log.stream.jsonl
+    "$dir"/fresheyes-*-"$pid".log.stderr
   )
   shopt -u nullglob
 
@@ -57,6 +99,48 @@ _find_base_for_pid() {
     return 1
   fi
   _base_from_related_path "$newest"
+}
+
+_find_base_for_pid() {
+  local pid="$1"
+  local dir
+  local candidate_dirs=("$LOG_DIR")
+
+  if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
+    candidate_dirs+=("$GLOBAL_LOG_DIR")
+  fi
+  if [[ -d /tmp/claude-1000/fresheyes-logs && "/tmp/claude-1000/fresheyes-logs" != "$LOG_DIR" && "/tmp/claude-1000/fresheyes-logs" != "$GLOBAL_LOG_DIR" ]]; then
+    candidate_dirs+=("/tmp/claude-1000/fresheyes-logs")
+  fi
+
+  for dir in "${candidate_dirs[@]}"; do
+    if [[ -d "$dir" ]]; then
+      if _find_base_for_pid_in_dir "$dir" "$pid"; then
+        return 0
+      fi
+    fi
+  done
+
+  return 1
+}
+
+_review_is_running() {
+  local requested_pid="$1"
+  local base="$2"
+  local owner_pid
+
+  if kill -0 "$requested_pid" 2>/dev/null; then
+    return 0
+  fi
+
+  owner_pid=$(_pid_from_base "$base" 2>/dev/null || true)
+  if [[ -n "$owner_pid" && "$owner_pid" != "$requested_pid" ]]; then
+    if kill -0 "$owner_pid" 2>/dev/null; then
+      return 0
+    fi
+  fi
+
+  return 1
 }
 
 _find_legacy_base() {
@@ -254,7 +338,7 @@ else
   fi
 fi
 
-if [[ -n "$PID" ]] && ! kill -0 "$PID" 2>/dev/null; then
+if [[ -n "$PID" ]] && ! _review_is_running "$PID" "$LOG_FILE"; then
   rm -f "$LOG_DIR/.active.$PID"
   if cat_if_nonempty "$LOG_FILE"; then
     exit 0

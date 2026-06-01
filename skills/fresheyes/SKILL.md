@@ -69,6 +69,8 @@ echo "FRESHPID=$FRESHPID"
 
 Save `$FRESHPID`. This is your handle for the entire review lifecycle.
 
+Do not prefix the launch line with `cmd &&` before the trailing `&`. In Bash, `cmd && setsid ... &` backgrounds the whole command list and `$!` can become a short-lived launcher shell instead of the review process. Run preflight commands separately, then launch Fresheyes exactly as its own background command.
+
 ### Step 5: Poll every 2 minutes
 
 Every 120 seconds, run ONE bash call that checks liveness and progress:

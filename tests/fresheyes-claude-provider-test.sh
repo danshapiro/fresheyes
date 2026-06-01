@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER="$ROOT_DIR/skills/fresheyes/fresheyes.sh"
+PROGRESS_SCRIPT="$ROOT_DIR/skills/fresheyes/fresheyes-progress.sh"
 PARSER="$ROOT_DIR/skills/fresheyes/fresheyes-claude-stream.py"
 PYTHON=".venv-wsl/bin/python"
 if [[ ! -x "$ROOT_DIR/$PYTHON" ]]; then
@@ -256,9 +257,43 @@ test_parser_missing_result_writes_failure_log() {
   assert_contains "$output" "Fresh Eyes review failed before final output" "parser failure stdout"
 }
 
+test_compound_launch_parent_pid_recovers_review() {
+  local run_tmp stdout_file captured_pid progress_output
+  run_tmp="$(mktemp -d "$TEST_TMP/compound.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  rm -f "$ARGV_FILE"
+
+  captured_pid=$(
+    TMPDIR="$run_tmp" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    timeout 30s bash -c \
+      'true && setsid bash "$1" --claude "Review README.md." </dev/null > "$2" 2>/dev/null & echo "$!"' \
+      bash "$RUNNER" "$stdout_file"
+  )
+
+  [[ "$captured_pid" =~ ^[0-9]+$ ]] || fail "compound launch did not return a pid: $captured_pid"
+  for _ in {1..50}; do
+    progress_output=$(
+      TMPDIR="$run_tmp" \
+      FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+      bash "$PROGRESS_SCRIPT" "$captured_pid"
+    )
+    if [[ "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  printf 'Compound launch progress never returned final review. pid=%s output:\n%s\n' "$captured_pid" "$progress_output" >&2
+  exit 1
+}
+
 make_fake_claude
 test_manual_claude_invocation_uses_streaming_flags
 test_automatic_claude_extracts_structured_output
 test_parser_missing_result_writes_failure_log
+test_compound_launch_parent_pid_recovers_review
 
 printf 'fresheyes-claude-provider tests passed\n'

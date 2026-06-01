@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROGRESS_SCRIPT="$ROOT_DIR/skills/fresheyes/fresheyes-progress.sh"
 TEST_TMP="$(mktemp -d)"
 LOG_DIR="$TEST_TMP/fresheyes-logs"
+GLOBAL_LOG_DIR="$TEST_TMP/global-fresheyes-logs"
 LIVE_PIDS=()
 
 cleanup() {
@@ -52,7 +53,7 @@ assert_equals() {
 }
 
 run_progress() {
-  TMPDIR="$TEST_TMP" bash "$PROGRESS_SCRIPT" "$1"
+  TMPDIR="$TEST_TMP" FRESHEYES_GLOBAL_LOG_DIR="$GLOBAL_LOG_DIR" bash "$PROGRESS_SCRIPT" "$1"
 }
 
 start_live_pid() {
@@ -78,6 +79,14 @@ write_active() {
   local base="$2"
   mkdir -p "$LOG_DIR"
   printf '%s\n' "$base" > "$LOG_DIR/.active.$pid"
+}
+
+write_parent_alias() {
+  local parent_pid="$1"
+  local base="$2"
+  local dir="${3:-$LOG_DIR}"
+  mkdir -p "$dir"
+  printf '%s\n' "$base" > "$dir/.parent.$parent_pid"
 }
 
 write_claude_events() {
@@ -185,11 +194,68 @@ JSON
   assert_contains "$output" "schema output was empty" "dead empty log diagnostics"
 }
 
+test_dead_launcher_alias_to_live_owner_reports_running() {
+  local parent_pid owner_pid base output
+  dead_pid parent_pid
+  start_live_pid owner_pid
+  base="$LOG_DIR/fresheyes-test-$owner_pid.log"
+  write_parent_alias "$parent_pid" "$base"
+  write_claude_events "$base"
+
+  output=$(run_progress "$parent_pid")
+  assert_contains "$output" "running" "dead launcher alias live owner"
+  assert_contains "$output" "provider=claude" "dead launcher alias live owner"
+  assert_contains "$output" "final_lines=0" "dead launcher alias live owner"
+}
+
+test_dead_launcher_alias_to_finished_owner_returns_review() {
+  local parent_pid owner_pid base output
+  dead_pid parent_pid
+  dead_pid owner_pid
+  base="$LOG_DIR/fresheyes-test-$owner_pid.log"
+  write_parent_alias "$parent_pid" "$base"
+  cat > "$base" <<'TEXT'
+## Files Examined
+
+- README.md
+
+INDEPENDENT CODE REVIEW FAILED
+TEXT
+
+  output=$(run_progress "$parent_pid")
+  assert_contains "$output" "## Files Examined" "dead launcher alias finished owner"
+  assert_contains "$output" "INDEPENDENT CODE REVIEW FAILED" "dead launcher alias finished owner"
+}
+
+test_global_parent_alias_recovers_mismatched_tmpdir() {
+  local parent_pid owner_pid alt_log_dir base output
+  dead_pid parent_pid
+  dead_pid owner_pid
+  alt_log_dir="$TEST_TMP/alternate-tmp/fresheyes-logs"
+  base="$alt_log_dir/fresheyes-test-$owner_pid.log"
+  write_parent_alias "$parent_pid" "$base" "$GLOBAL_LOG_DIR"
+  mkdir -p "$alt_log_dir"
+  cat > "$base" <<'TEXT'
+## Files Examined
+
+- README.md
+
+INDEPENDENT CODE REVIEW PASSED
+TEXT
+
+  output=$(run_progress "$parent_pid")
+  assert_contains "$output" "## Files Examined" "global parent alias mismatched tmpdir"
+  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global parent alias mismatched tmpdir"
+}
+
 test_alive_claude_sidecars_missing_log
 test_alive_claude_sidecars_empty_log
 test_alive_gpt_preserves_numeric_progress
 test_dead_success_returns_final_review
 test_dead_crash_missing_log_returns_diagnostics
 test_dead_crash_empty_log_returns_diagnostics
+test_dead_launcher_alias_to_live_owner_reports_running
+test_dead_launcher_alias_to_finished_owner_returns_review
+test_global_parent_alias_recovers_mismatched_tmpdir
 
 printf 'fresheyes-progress tests passed\n'

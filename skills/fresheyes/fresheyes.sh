@@ -146,6 +146,7 @@ print(template.replace('{{REVIEW_SCOPE}}', sys.argv[2]))
 
 # --- Log file setup ---
 LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
+GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
 EVENT_LOG="$LOG_FILE.events.jsonl"
@@ -160,6 +161,21 @@ if [[ "$PROVIDER" == "claude" ]]; then
 fi
 
 echo "$LOG_FILE" > "$LOG_DIR/.active.$$"
+
+write_tracker_alias() {
+  local dir="$1"
+  local name="$2"
+
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s\n' "$LOG_FILE" > "$dir/$name" 2>/dev/null || true
+}
+
+write_tracker_alias "$LOG_DIR" ".locator.$$"
+write_tracker_alias "$LOG_DIR" ".parent.$PPID"
+if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
+  write_tracker_alias "$GLOBAL_LOG_DIR" ".locator.$$"
+  write_tracker_alias "$GLOBAL_LOG_DIR" ".parent.$PPID"
+fi
 
 HEARTBEAT_PID=""
 
