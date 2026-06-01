@@ -43,7 +43,7 @@ In Claude Code:
 
 By default, the skill picks a different model family from the one invoking it. The reviewer operates independently — it receives only the scope you give it, with no conversation context.
 
-Claude-provider background reviews report live progress through structured sidecar logs and still return the final review text when complete.
+Claude-provider reviews show live progress through the polling command and still return the final review text when complete.
 
 ## Automatic Mode (pre-commit)
 
