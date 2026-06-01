@@ -1,301 +1,141 @@
 # Claude Provider Streaming Progress Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> For agentic workers: implement this plan task-by-task. Keep commits scoped to one task when practical. Do not skip the failing-test steps; they guard the exact regressions validated during review.
 
-**Goal:** Make Fresheyes' Claude provider report real progress and clean up correctly by using Claude Code's supported `stream-json` output for all Claude review modes.
+## Goal
 
-**Architecture:** Keep the current shell runner as the public entrypoint, but add a small Python stream parser dedicated to Claude JSONL events. The runner writes final review output to the existing `.log` file and structured progress events to a `.events.jsonl` sidecar; `fresheyes-progress.sh` reads the sidecar while the process is alive and still returns the final review when the process is dead.
+Make Fresheyes' Claude provider report real progress while a review is alive, surface useful diagnostics when Claude crashes before final output, and clean up process trees correctly on timeout.
 
-**Tech Stack:** Bash, Python 3 standard library, Claude Code CLI `2.1.159+`, Codex CLI unchanged, `jq` for tests.
-
----
-
-## Scope
-
-This plan fixes the Claude provider generally, covering both Fresheyes modes:
+The fix covers both Claude modes:
 
 - `provider=claude, mode=manual`: human-readable markdown review.
 - `provider=claude, mode=automatic`: pre-commit JSON review.
 
-This plan does not change the GPT provider's behavior except preserving compatibility in `fresheyes-progress.sh`.
+The GPT provider must keep its existing progress behavior unless a later task explicitly redesigns it.
 
-## File Structure
+## Validated Facts
 
-- Create: `tests/fresheyes-claude-provider-test.sh`
-  - End-to-end shell tests using a fake `claude` executable.
-  - Proves Claude is invoked with `stream-json`, `--disable-slash-commands`, and no `--bare`.
-  - Proves manual and automatic Claude results are extracted from the stream.
+These facts were checked by independent subagents and small local reproductions:
 
-- Create: `tests/fresheyes-progress-test.sh`
-  - Unit-style shell tests for progress behavior using synthetic log/event files.
-  - Proves alive Claude reviews return event progress instead of `0`.
-  - Proves dead reviews still return the final review text.
+- Local Claude Code CLI is `2.1.159` and supports `-p`, `--output-format stream-json`, `--verbose`, `--include-partial-messages`, `--disable-slash-commands`, `--effort`, and `--json-schema`.
+- Claude `stream-json` emits newline-delimited JSON before completion. A local run grew from 2 lines at about 1 second to 51 lines at completion.
+- `--disable-slash-commands` does not prevent ordinary allowed tool use.
+- `--bare` fails local auth and must not be added by default.
+- `--json-schema` with `stream-json` surfaces final structured output in the final `result` event's `structured_output` field.
+- Current `fresheyes-progress.sh` resolves a run only when the final `.log` exists. If only sidecars exist, it returns `0`.
+- Fixing `_find_log` alone is not enough. Downstream `cat "$LOG_FILE"` and `wc -l < "$LOG_FILE"` must also tolerate missing or empty `.log` files.
+- A test that pre-creates `.log` masks the bug. The progress tests must include sidecars present with `.log` missing.
+- Shared `.events.jsonl` output for every provider would change GPT progress from numeric line counts to event summaries. Event progress must be gated to Claude.
+- Current dead-process behavior can hide crashes: missing `.log` plus sidecars/stderr returns `0`, and empty `.log` returns empty output.
+- `setsid bash script &` makes `$!` the wrapper PID, PGID, and SID on this Linux environment. `kill "$FRESHPID"` kills only the wrapper; `kill -- -"$FRESHPID"` kills children in the same process group.
+- A child that deliberately calls its own `setsid` can escape the process group. This is an acceptable caveat and should be documented only if needed.
 
-- Create: `skills/fresheyes/fresheyes-claude-stream.py`
-  - Reads Claude `stream-json` JSONL from stdin.
-  - Writes raw stream lines to `.stream.jsonl`.
-  - Writes structured JSONL progress records to `.events.jsonl`.
-  - Writes final manual review text to `.log`.
-  - Writes final automatic structured output to `fresheyes-automatic-*.json`.
+## Design
 
-- Modify: `skills/fresheyes/fresheyes.sh`
-  - Add structured event log paths.
-  - Add JSONL event logging for startup, heartbeat, provider start, provider exit, and failures.
-  - Change all Claude provider calls to `--output-format stream-json --verbose --include-partial-messages --disable-slash-commands`.
-  - Keep Claude auth behavior unchanged by not using `--bare`.
+Use Claude Code `stream-json` only for the Claude provider. The runner keeps the existing `.log` as the final user-facing result and adds sidecars for live progress:
 
-- Modify: `skills/fresheyes/fresheyes-progress.sh`
-  - Read `.events.jsonl` for alive Claude reviews.
-  - Preserve current dead-process behavior of returning the final `.log`.
-  - Preserve line-count fallback for GPT and older logs.
+- `$LOG_FILE`: final review text for manual mode, final structured JSON text for automatic mode, or a concise failure report.
+- `$LOG_FILE.events.jsonl`: normalized structured progress and error events. Every record includes at least `severity`, `event`, `provider`, and `ts_epoch`.
+- `$LOG_FILE.stream.jsonl`: raw Claude `stream-json` lines.
+- `$LOG_FILE.stderr`: Claude stderr.
 
-- Modify: `skills/fresheyes/SKILL.md`
-  - Replace line-count polling guidance with progress-status polling.
-  - Remove the unchanged-line-count stall kill rule for Claude.
-  - Use process-group cleanup: `kill -- -$FRESHPID`.
+Progress lookup must treat the active file as a base path, not only as an existing final log. If `.active.$PID` points to `/tmp/.../fresheyes-...-$PID.log`, progress can use that base path when any of these files exists:
 
-- Modify: `README.md`
-  - No interface change is required.
-  - Add one short line to configuration docs noting that Claude progress uses structured sidecar logs if the runner is launched in the background.
+- the base `.log`
+- `.log.events.jsonl`
+- `.log.stream.jsonl`
+- `.log.stderr`
 
-## Task 1: Add Claude Provider End-to-End Tests
+Alive progress behavior:
+
+- If the event log proves `provider=claude`, print a single status line such as:
+
+```text
+running provider=claude provider_events=42 last_provider_event=tool_result final_lines=0
+```
+
+- Count only provider-originated Claude events in `provider_events`. Wrapper events such as `review_started`, `provider_started`, and `heartbeat` must not fake model progress.
+- If the provider is GPT, unknown, or legacy, preserve numeric line count using `.log` if present. If `.log` is missing, return `0` instead of shell errors.
+
+Dead progress behavior:
+
+- If `.log` exists and is non-empty, print it exactly.
+- If `.log` is missing or empty, print a diagnostic assembled from `.events.jsonl` and `.stderr`.
+- The diagnostic must not be just `0` when sidecars or stderr contain useful information.
+
+Timeout cleanup behavior:
+
+```bash
+kill -- -"$FRESHPID" 2>/dev/null || kill "$FRESHPID" 2>/dev/null || true
+```
+
+## Non-Goals
+
+- Do not switch GPT to event-summary progress in this change.
+- Do not use `--bare`.
+- Do not replace the shell runner with a different public interface.
+- Do not add CPU-based, process-tree-based, or stderr-line-count stall heuristics.
+- Do not update end-user docs outside `README.md`.
+
+## File Changes
+
+- Create `tests/fresheyes-progress-test.sh`.
+- Create `tests/fresheyes-claude-provider-test.sh`.
+- Create `skills/fresheyes/fresheyes-claude-stream.py`.
+- Modify `skills/fresheyes/fresheyes.sh`.
+- Modify `skills/fresheyes/fresheyes-progress.sh`.
+- Modify `skills/fresheyes/SKILL.md`.
+- Modify `README.md` only if a user-facing note is still useful after implementation.
+
+## Task 1: Add Progress Tests First
 
 **Files:**
-- Create: `tests/fresheyes-claude-provider-test.sh`
 
-- [ ] **Step 1: Write the failing test script**
+- Create `tests/fresheyes-progress-test.sh`.
 
-Create `tests/fresheyes-claude-provider-test.sh` with this complete content:
+Add a shell test script that uses `TMPDIR="$(mktemp -d)"` and synthetic active files. The test must not depend on the real `/tmp/fresheyes-logs`.
 
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
+Required test cases:
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+1. **Alive Claude, sidecars exist, `.log` missing**
+   - Start `sleep 60 &` and capture `pid`.
+   - Write `$TMPDIR/fresheyes-logs/.active.$pid` pointing at a base path ending in `-$pid.log`.
+   - Do not create the base `.log`.
+   - Create `$base.events.jsonl` with provider-originated Claude events.
+   - Expected after implementation: output contains `running`, `provider=claude`, `provider_events=`, and `final_lines=0`.
+   - Expected before implementation: current script returns `0`.
 
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
+2. **Alive Claude, sidecars exist, empty `.log` exists**
+   - Same as case 1, but create `: > "$base"`.
+   - Expected: same Claude running status.
+   - This catches accidental dependency on final review content.
 
-assert_contains() {
-  local file="$1"
-  local pattern="$2"
-  grep -Fq -- "$pattern" "$file" || fail "expected $file to contain: $pattern"
-}
+3. **Alive GPT with event sidecar preserves numeric progress**
+   - Create live `sleep 60 &`.
+   - Create `.active.$pid`, a `.log` with three lines, and a `.events.jsonl` containing `{"provider":"gpt"}`.
+   - Expected: output is exactly `3`.
+   - This prevents the ungated event-progress regression.
 
-assert_not_contains() {
-  local file="$1"
-  local pattern="$2"
-  if grep -Fq -- "$pattern" "$file"; then
-    fail "expected $file not to contain: $pattern"
-  fi
-}
+4. **Dead success returns final review text**
+   - Use a definitely dead PID from a helper, not a hard-coded large PID.
+   - Create `.active.$pid` and a non-empty `.log`.
+   - Expected: output contains `## Files Examined` and `INDEPENDENT CODE REVIEW PASSED`.
 
-make_fake_claude() {
-  local bin_dir="$1"
-  mkdir -p "$bin_dir"
-  cat >"$bin_dir/claude" <<'SH'
-#!/usr/bin/env bash
-set -euo pipefail
+5. **Dead crash with `.log` missing returns diagnostics**
+   - Use a dead PID.
+   - Write `.active.$pid` pointing at a missing `.log`.
+   - Create `.events.jsonl` with an `error` severity event and `.stderr` with a short error message.
+   - Expected: output contains `Fresh Eyes review failed before final output`, the error event name, and the stderr message. It must not be `0`.
 
-printf '%s\n' "$@" >"${CLAUDE_ARGS_FILE:?}"
+6. **Dead crash with empty `.log` returns diagnostics**
+   - Same as case 5, but create empty `.log`.
+   - Expected: diagnostic output, not empty output.
 
-case "${CLAUDE_FAKE_MODE:?}" in
-  manual)
-    cat <<'JSON'
-{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-opus","tools":["Bash","Read","Glob","Grep"],"slash_commands":[],"skills":[]}
-{"type":"system","subtype":"status","status":"requesting","session_id":"fake-session"}
-{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_fake","name":"Bash","input":{"command":"git diff --stat"},"caller":{"type":"direct"}}},"session_id":"fake-session"}
-{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_fake","type":"tool_result","content":" README.md | 1 +","is_error":false}]},"session_id":"fake-session","tool_use_result":{"stdout":" README.md | 1 +","stderr":"","interrupted":false}}
-{"type":"result","subtype":"success","is_error":false,"duration_ms":1250,"num_turns":2,"result":"## Files Examined\n- README.md\n\n## Issues Found\nNone\n\n## Summary\nFake review passed.\n\n---\n**INDEPENDENT CODE REVIEW PASSED**","session_id":"fake-session","terminal_reason":"completed"}
-JSON
-    ;;
-  automatic)
-    cat <<'JSON'
-{"type":"system","subtype":"init","session_id":"fake-session","model":"fake-opus","tools":["Bash","Read","Glob","Grep","StructuredOutput"],"slash_commands":[],"skills":[]}
-{"type":"system","subtype":"status","status":"requesting","session_id":"fake-session"}
-{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_structured","name":"StructuredOutput","input":{"approve_commit":true,"issues":[]},"caller":{"type":"direct"}}},"session_id":"fake-session"}
-{"type":"user","message":{"role":"user","content":[{"tool_use_id":"toolu_structured","type":"tool_result","content":"Structured output provided successfully"}]},"session_id":"fake-session","tool_use_result":"Structured output provided successfully"}
-{"type":"result","subtype":"success","is_error":false,"duration_ms":1500,"num_turns":2,"result":"Done - returned structured output.","structured_output":{"approve_commit":true,"issues":[]},"session_id":"fake-session","terminal_reason":"completed"}
-JSON
-    ;;
-  *)
-    echo "unknown CLAUDE_FAKE_MODE: ${CLAUDE_FAKE_MODE}" >&2
-    exit 2
-    ;;
-esac
-SH
-  chmod +x "$bin_dir/claude"
-}
+Implementation notes for the test:
 
-run_manual_test() {
-  local tmp
-  tmp="$(mktemp -d)"
-  make_fake_claude "$tmp/bin"
-
-  PATH="$tmp/bin:$PATH" \
-  TMPDIR="$tmp" \
-  CLAUDE_ARGS_FILE="$tmp/claude-args.txt" \
-  CLAUDE_FAKE_MODE=manual \
-    bash "$ROOT_DIR/skills/fresheyes/fresheyes.sh" --claude "Review README.md." >"$tmp/stdout.txt"
-
-  local log_file
-  log_file="$(ls "$tmp/fresheyes-logs"/fresheyes-*.log)"
-  local event_log="$log_file.events.jsonl"
-  local stream_log="$log_file.stream.jsonl"
-
-  assert_contains "$tmp/stdout.txt" "**INDEPENDENT CODE REVIEW PASSED**"
-  assert_contains "$log_file" "## Files Examined"
-  test -s "$event_log" || fail "expected non-empty event log"
-  test -s "$stream_log" || fail "expected non-empty raw stream log"
-
-  assert_contains "$tmp/claude-args.txt" "--output-format"
-  assert_contains "$tmp/claude-args.txt" "stream-json"
-  assert_contains "$tmp/claude-args.txt" "--verbose"
-  assert_contains "$tmp/claude-args.txt" "--include-partial-messages"
-  assert_contains "$tmp/claude-args.txt" "--disable-slash-commands"
-  assert_not_contains "$tmp/claude-args.txt" "--bare"
-
-  jq -e 'select(.severity == "info" and .event == "provider_event" and .provider == "claude")' "$event_log" >/dev/null
-  jq -e 'select(.severity == "info" and .event == "review_result" and .provider == "claude")' "$event_log" >/dev/null
-}
-
-run_automatic_test() {
-  local tmp
-  tmp="$(mktemp -d)"
-  make_fake_claude "$tmp/bin"
-
-  PATH="$tmp/bin:$PATH" \
-  TMPDIR="$tmp" \
-  CLAUDE_ARGS_FILE="$tmp/claude-args.txt" \
-  CLAUDE_FAKE_MODE=automatic \
-    bash "$ROOT_DIR/skills/fresheyes/fresheyes.sh" --claude --mode automatic "Review staged changes." >"$tmp/stdout.txt"
-
-  local log_file
-  log_file="$(ls "$tmp/fresheyes-logs"/fresheyes-*.log)"
-  local output_file
-  output_file="$(ls "$tmp/fresheyes-logs"/fresheyes-automatic-*.json)"
-
-  assert_contains "$tmp/stdout.txt" "Fresh Eyes: approved."
-  jq -e '.approve_commit == true and (.issues | length) == 0' "$output_file" >/dev/null
-  jq -e 'select(.event == "structured_output" and .provider == "claude")' "$log_file.events.jsonl" >/dev/null
-
-  assert_contains "$tmp/claude-args.txt" "--json-schema"
-  assert_contains "$tmp/claude-args.txt" "--output-format"
-  assert_contains "$tmp/claude-args.txt" "stream-json"
-  assert_contains "$tmp/claude-args.txt" "--disable-slash-commands"
-}
-
-run_manual_test
-run_automatic_test
-echo "fresheyes Claude provider tests passed"
-```
-
-- [ ] **Step 2: Run the test and verify it fails before implementation**
-
-Run:
-
-```bash
-bash tests/fresheyes-claude-provider-test.sh
-```
-
-Expected before implementation: failure mentioning either the missing `.events.jsonl` file or missing `stream-json` Claude argument.
-
-- [ ] **Step 3: Commit the failing test**
-
-```bash
-git add tests/fresheyes-claude-provider-test.sh
-git commit -m "test: cover Claude provider streaming progress"
-```
-
-## Task 2: Add Progress Script Tests
-
-**Files:**
-- Create: `tests/fresheyes-progress-test.sh`
-
-- [ ] **Step 1: Write the failing progress tests**
-
-Create `tests/fresheyes-progress-test.sh` with this complete content:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-
-fail() {
-  echo "FAIL: $*" >&2
-  exit 1
-}
-
-assert_contains_text() {
-  local text="$1"
-  local expected="$2"
-  [[ "$text" == *"$expected"* ]] || fail "expected output to contain: $expected; got: $text"
-}
-
-run_alive_claude_progress_test() {
-  local tmp
-  tmp="$(mktemp -d)"
-  local log_dir="$tmp/fresheyes-logs"
-  mkdir -p "$log_dir"
-
-  sleep 60 &
-  local pid=$!
-  trap 'kill "$pid" 2>/dev/null || true' RETURN
-
-  local log_file="$log_dir/fresheyes-20260601-000000-$pid.log"
-  : >"$log_file"
-  printf '%s\n' "$log_file" >"$log_dir/.active.$pid"
-
-  cat >"$log_file.events.jsonl" <<JSONL
-{"severity":"info","event":"review_started","provider":"claude","pid":$pid}
-{"severity":"info","event":"provider_event","provider":"claude","type":"system","subtype":"status","status":"requesting"}
-{"severity":"info","event":"provider_event","provider":"claude","type":"stream_event","stream_event_type":"content_block_start","tool":"Bash"}
-JSONL
-
-  local output
-  output="$(TMPDIR="$tmp" bash "$ROOT_DIR/skills/fresheyes/fresheyes-progress.sh" "$pid")"
-  assert_contains_text "$output" "running"
-  assert_contains_text "$output" "provider=claude"
-  assert_contains_text "$output" "events=3"
-  assert_contains_text "$output" "last_event=provider_event"
-  assert_contains_text "$output" "final_lines=0"
-}
-
-run_dead_review_returns_final_log_test() {
-  local tmp
-  tmp="$(mktemp -d)"
-  local log_dir="$tmp/fresheyes-logs"
-  mkdir -p "$log_dir"
-
-  local pid=999999
-  local log_file="$log_dir/fresheyes-20260601-000000-$pid.log"
-  cat >"$log_file" <<'LOG'
-## Files Examined
-- README.md
-
-## Issues Found
-None
-
----
-**INDEPENDENT CODE REVIEW PASSED**
-LOG
-  printf '%s\n' "$log_file" >"$log_dir/.active.$pid"
-
-  local output
-  output="$(TMPDIR="$tmp" bash "$ROOT_DIR/skills/fresheyes/fresheyes-progress.sh" "$pid")"
-  assert_contains_text "$output" "## Files Examined"
-  assert_contains_text "$output" "**INDEPENDENT CODE REVIEW PASSED**"
-}
-
-run_alive_claude_progress_test
-run_dead_review_returns_final_log_test
-echo "fresheyes progress tests passed"
-```
-
-- [ ] **Step 2: Run the test and verify it fails before implementation**
+- Use a `cleanup` trap to kill live `sleep` processes.
+- Use `.venv-wsl/bin/python` only if it exists and Python is needed from the test. Prefer Bash and `jq` for JSONL fixtures.
+- Do not pre-create `.log` in the sidecar-only test.
 
 Run:
 
@@ -303,648 +143,370 @@ Run:
 bash tests/fresheyes-progress-test.sh
 ```
 
-Expected before implementation: `run_alive_claude_progress_test` fails because `fresheyes-progress.sh` returns `0` instead of `running provider=claude events=3 ...`.
+Expected before implementation: at least the sidecar-only and dead-diagnostic tests fail.
 
-- [ ] **Step 3: Commit the failing test**
+Commit:
 
 ```bash
 git add tests/fresheyes-progress-test.sh
-git commit -m "test: cover Claude progress sidecar status"
+git commit -m "test: cover Fresheyes progress edge cases"
 ```
 
-## Task 3: Add the Claude Stream Parser
+## Task 2: Add Claude Stream Parser Tests and Fake CLI Tests
 
 **Files:**
-- Create: `skills/fresheyes/fresheyes-claude-stream.py`
-- Test: `tests/fresheyes-claude-provider-test.sh`
 
-- [ ] **Step 1: Create the parser**
+- Create `tests/fresheyes-claude-provider-test.sh`.
 
-Create `skills/fresheyes/fresheyes-claude-stream.py` with this complete content:
+Add a shell test using a fake `claude` executable placed at the front of `PATH`. The fake CLI should:
 
-```python
-#!/usr/bin/env python3
-from __future__ import annotations
+- Record all argv entries to a file.
+- Emit valid Claude `stream-json` JSONL for manual mode.
+- Emit valid Claude `stream-json` JSONL with `structured_output` for automatic mode.
+- Optionally sleep briefly between events for one case so progress can be checked before final output.
 
-import argparse
-import json
-import sys
-import time
-from pathlib import Path
-from typing import Any
+Required test cases:
 
+1. **Manual Claude invocation uses streaming flags**
+   - Run `skills/fresheyes/fresheyes.sh --claude "Review README.md."`.
+   - Assert argv contains:
+     - `--output-format`
+     - `stream-json`
+     - `--verbose`
+     - `--include-partial-messages`
+     - `--disable-slash-commands`
+   - Assert argv does not contain `--bare`.
+   - Assert final stdout contains `INDEPENDENT CODE REVIEW PASSED`.
+   - Assert `.events.jsonl`, `.stream.jsonl`, `.stderr`, and `.log` exist.
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Parse Claude Code stream-json output for Fresheyes.")
-    parser.add_argument("--mode", choices=("manual", "automatic"), required=True)
-    parser.add_argument("--review-log", required=True)
-    parser.add_argument("--event-log", required=True)
-    parser.add_argument("--stream-log", required=True)
-    parser.add_argument("--automatic-output")
-    return parser.parse_args()
+2. **Automatic Claude invocation extracts structured output**
+   - Run `skills/fresheyes/fresheyes.sh --claude --mode automatic "Review staged changes."`.
+   - Fake final event includes:
 
-
-def append_jsonl(path: Path, record: dict[str, Any]) -> None:
-    record.setdefault("ts_epoch", time.time())
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
-        handle.write("\n")
-
-
-def append_event(path: Path, severity: str, event: str, **fields: Any) -> None:
-    record: dict[str, Any] = {
-        "severity": severity,
-        "event": event,
-        "provider": "claude",
-    }
-    record.update(fields)
-    append_jsonl(path, record)
-
-
-def summarize_provider_event(record: dict[str, Any]) -> dict[str, Any]:
-    summary: dict[str, Any] = {
-        "type": record.get("type", "unknown"),
-    }
-    if "subtype" in record:
-        summary["subtype"] = record["subtype"]
-    if "status" in record:
-        summary["status"] = record["status"]
-    if "session_id" in record:
-        summary["session_id"] = record["session_id"]
-
-    nested = record.get("event")
-    if isinstance(nested, dict):
-        nested_type = nested.get("type")
-        if nested_type:
-            summary["stream_event_type"] = nested_type
-        content_block = nested.get("content_block")
-        if isinstance(content_block, dict):
-            block_type = content_block.get("type")
-            if block_type:
-                summary["content_block_type"] = block_type
-            tool_name = content_block.get("name")
-            if tool_name:
-                summary["tool"] = tool_name
-        delta = nested.get("delta")
-        if isinstance(delta, dict):
-            delta_type = delta.get("type")
-            if delta_type:
-                summary["delta_type"] = delta_type
-
-    if record.get("type") == "user" and "tool_use_result" in record:
-        summary["stream_event_type"] = "tool_result"
-
-    return summary
-
-
-def extract_structured_from_result(result: dict[str, Any]) -> dict[str, Any]:
-    structured = result.get("structured_output")
-    if isinstance(structured, dict):
-        return structured
-
-    result_text = result.get("result")
-    if isinstance(result_text, str):
-        try:
-            parsed = json.loads(result_text)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            return parsed
-
-    raise ValueError("Claude stream result did not include structured_output or JSON result text")
-
-
-def write_text(path: Path, text: str) -> None:
-    path.write_text(text, encoding="utf-8")
-    if text and not text.endswith("\n"):
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write("\n")
-
-
-def main() -> int:
-    args = parse_args()
-    review_log = Path(args.review_log)
-    event_log = Path(args.event_log)
-    stream_log = Path(args.stream_log)
-    automatic_output = Path(args.automatic_output) if args.automatic_output else None
-
-    append_event(event_log, "info", "stream_parser_started", mode=args.mode)
-
-    final_result: dict[str, Any] | None = None
-    line_count = 0
-
-    with stream_log.open("a", encoding="utf-8") as raw_handle:
-        for raw_line in sys.stdin:
-            if not raw_line.strip():
-                continue
-            line_count += 1
-            raw_handle.write(raw_line)
-            raw_handle.flush()
-
-            try:
-                record = json.loads(raw_line)
-            except json.JSONDecodeError as exc:
-                append_event(
-                    event_log,
-                    "warn",
-                    "provider_unparseable_line",
-                    line=line_count,
-                    error=str(exc),
-                )
-                continue
-
-            summary = summarize_provider_event(record)
-            summary["line"] = line_count
-            append_event(event_log, "info", "provider_event", **summary)
-
-            if record.get("type") == "result":
-                final_result = record
-
-    if final_result is None:
-        append_event(event_log, "error", "missing_result", lines=line_count)
-        return 2
-
-    if final_result.get("is_error") is True:
-        result_text = str(final_result.get("result", "Claude returned an error without result text."))
-        write_text(review_log, result_text)
-        append_event(
-            event_log,
-            "error",
-            "review_result",
-            is_error=True,
-            terminal_reason=final_result.get("terminal_reason"),
-            stop_reason=final_result.get("stop_reason"),
-        )
-        print(result_text)
-        return 1
-
-    if args.mode == "manual":
-        result_text = str(final_result.get("result", ""))
-        write_text(review_log, result_text)
-        append_event(
-            event_log,
-            "info",
-            "review_result",
-            is_error=False,
-            terminal_reason=final_result.get("terminal_reason"),
-            stop_reason=final_result.get("stop_reason"),
-            duration_ms=final_result.get("duration_ms"),
-            num_turns=final_result.get("num_turns"),
-        )
-        print(result_text)
-        return 0
-
-    if automatic_output is None:
-        append_event(event_log, "error", "missing_automatic_output_path")
-        return 2
-
-    try:
-        structured = extract_structured_from_result(final_result)
-    except ValueError as exc:
-        append_event(event_log, "error", "structured_output_missing", error=str(exc))
-        return 2
-
-    automatic_output.write_text(json.dumps(structured, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    write_text(review_log, json.dumps(structured, indent=2, sort_keys=True))
-    append_event(
-        event_log,
-        "info",
-        "structured_output",
-        approve_commit=structured.get("approve_commit"),
-        issue_count=len(structured.get("issues", [])) if isinstance(structured.get("issues"), list) else None,
-    )
-    append_event(
-        event_log,
-        "info",
-        "review_result",
-        is_error=False,
-        terminal_reason=final_result.get("terminal_reason"),
-        stop_reason=final_result.get("stop_reason"),
-        duration_ms=final_result.get("duration_ms"),
-        num_turns=final_result.get("num_turns"),
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+```json
+{"type":"result","subtype":"success","is_error":false,"result":"Done.","structured_output":{"approve_commit":true,"issues":[]}}
 ```
 
-- [ ] **Step 2: Make the parser executable**
+   - Assert the automatic output file contains `{"approve_commit": true, "issues": []}`.
+   - Assert stdout contains `Fresh Eyes: approved.`.
+
+3. **Parser missing-result failure writes a concise failure log**
+   - Feed JSONL with provider events but no final `result`.
+   - Assert parser exits non-zero.
+   - Assert `.events.jsonl` contains an error event named `missing_result`.
+   - Assert `.log` exists and contains a concise failure report.
+
+4. **Parser crash fallback is still covered by progress tests**
+   - Do not rely only on the parser writing `.log`; Task 1's dead sidecar-only cases must remain.
 
 Run:
 
 ```bash
-chmod +x skills/fresheyes/fresheyes-claude-stream.py
+bash tests/fresheyes-claude-provider-test.sh
 ```
 
-Expected: command exits with status `0`.
+Expected before implementation: failure because Claude is still called with `--output-format text` or `json`, and the parser does not exist.
 
-- [ ] **Step 3: Run syntax validation**
+Commit:
+
+```bash
+git add tests/fresheyes-claude-provider-test.sh
+git commit -m "test: cover Claude stream-json provider behavior"
+```
+
+## Task 3: Implement the Claude Stream Parser
+
+**Files:**
+
+- Create `skills/fresheyes/fresheyes-claude-stream.py`.
+
+Parser requirements:
+
+- Read Claude `stream-json` JSONL from stdin.
+- Append every raw non-empty line to `--stream-log`.
+- Append normalized JSONL records to `--event-log`.
+- Every normalized record must include:
+  - `severity`
+  - `event`
+  - `provider: "claude"`
+  - `ts_epoch`
+- Provider-originated records must use `event: "provider_event"`.
+- For provider events, record compact fields when present:
+  - `type`
+  - `subtype`
+  - `status`
+  - `session_id`
+  - nested stream event type
+  - tool name
+  - delta type
+- On final successful manual `result`, write `result` text to `--review-log` and print it to stdout.
+- On final successful automatic `result`, write `structured_output` to `--automatic-output`, write the same JSON to `--review-log`, and exit `0`.
+- If `structured_output` is missing in automatic mode, try parsing the `result` string as JSON. If neither works, write a concise failure `.log`, append `severity=error event=structured_output_missing`, and exit non-zero.
+- If the stream ends without a final `result`, write a concise failure `.log`, append `severity=error event=missing_result`, and exit non-zero.
+- If Claude emits `is_error: true`, write the error result text to `.log`, append `severity=error event=review_result`, print the error text, and exit non-zero.
+
+The missing-result failure log should look like this:
+
+```text
+Fresh Eyes review failed before final output.
+
+provider=claude
+error=missing_result
+stream_lines=<count>
+
+See sidecar logs:
+- <event log path>
+- <stream log path>
+```
 
 Run:
 
 ```bash
-python3 -m py_compile skills/fresheyes/fresheyes-claude-stream.py
+PYTHON=".venv-wsl/bin/python"; [[ -x "$PYTHON" ]] || PYTHON="python3"
+"$PYTHON" -m py_compile skills/fresheyes/fresheyes-claude-stream.py
+bash tests/fresheyes-claude-provider-test.sh
 ```
 
-Expected: command exits with status `0`.
-
-- [ ] **Step 4: Commit the parser**
+Commit:
 
 ```bash
-git add skills/fresheyes/fresheyes-claude-stream.py
-git commit -m "feat: parse Claude stream-json progress"
+git add skills/fresheyes/fresheyes-claude-stream.py tests/fresheyes-claude-provider-test.sh
+git commit -m "feat: parse Claude stream-json output"
 ```
 
-## Task 4: Wire Claude Provider to Stream JSON
+## Task 4: Wire Claude Provider to `stream-json`
 
 **Files:**
-- Modify: `skills/fresheyes/fresheyes.sh`
-- Test: `tests/fresheyes-claude-provider-test.sh`
 
-- [ ] **Step 1: Add stream log paths and structured runner events**
+- Modify `skills/fresheyes/fresheyes.sh`.
+- Test with `tests/fresheyes-claude-provider-test.sh`.
 
-In `skills/fresheyes/fresheyes.sh`, immediately after `LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"`, add:
+Implementation requirements:
+
+- Define:
 
 ```bash
 EVENT_LOG="$LOG_FILE.events.jsonl"
 STREAM_LOG="$LOG_FILE.stream.jsonl"
 ```
 
-After the `.active.$$` write, add this complete helper:
+- Pre-create the Claude sidecar files when the selected provider is Claude:
 
 ```bash
-log_event() {
-  local severity="$1"
-  local event="$2"
-  local message="${3:-}"
-  python3 - "$EVENT_LOG" "$severity" "$event" "$PROVIDER" "$MODE" "$$" "$message" <<'PY'
-import json
-import sys
-import time
-
-path, severity, event, provider, mode, pid, message = sys.argv[1:]
-record = {
-    "severity": severity,
-    "event": event,
-    "provider": provider,
-    "mode": mode,
-    "pid": int(pid),
-    "ts_epoch": time.time(),
-}
-if message:
-    record["message"] = message
-with open(path, "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")))
-    handle.write("\n")
-PY
-}
+if [[ "$PROVIDER" == "claude" ]]; then
+  : >"$LOG_FILE"
+  : >"$EVENT_LOG"
+  : >"$STREAM_LOG"
+  : >"$LOG_FILE.stderr"
+fi
 ```
 
-Replace the current startup `echo "Fresh Eyes [$$]: review starting..." >&2` block with:
+Pre-creating `.log` in production is acceptable and reduces races. Tests must still include the missing-`.log` sidecar case because progress must survive parser crashes and externally-created sidecars.
+
+- Add a `log_event` helper that writes JSONL with `severity`, `event`, `provider`, `mode`, `pid`, `ts_epoch`, and optional `message`.
+- Keep `log_event` available for Claude. If used for GPT too, progress must still gate event-summary output to Claude only.
+- Change `run_claude_manual` to call Claude with:
 
 ```bash
-log_event "info" "review_started" "Fresh Eyes review starting."
-echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please wait patiently." >&2
+--output-format stream-json
+--verbose
+--include-partial-messages
+--disable-slash-commands
 ```
 
-- [ ] **Step 2: Add heartbeat events**
-
-Replace `_start_heartbeat()` in `skills/fresheyes/fresheyes.sh` with:
-
-```bash
-_start_heartbeat() {
-  (
-    while true; do
-      sleep 300
-      log_event "info" "heartbeat" "Fresh Eyes review in progress."
-      echo "Fresh Eyes [$$]: review in progress..." >&2
-    done
-  ) &
-  HEARTBEAT_PID=$!
-}
-```
-
-- [ ] **Step 3: Replace `run_claude_manual`**
-
-Replace the full `run_claude_manual()` function with:
-
-```bash
-run_claude_manual() {
-  log_event "info" "provider_started" "Starting Claude provider in stream-json mode."
-  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
-    --model "$MODEL" \
-    --effort "$REASONING_EFFORT" \
-    --output-format stream-json \
-    --verbose \
-    --include-partial-messages \
-    --disable-slash-commands \
-    --allowedTools "$CLAUDE_TOOLS" \
-    --dangerously-skip-permissions \
-    "$PROMPT" 2>"$LOG_FILE.stderr" \
-    | python3 "$SCRIPT_DIR/fresheyes-claude-stream.py" \
-      --mode manual \
-      --review-log "$LOG_FILE" \
-      --event-log "$EVENT_LOG" \
-      --stream-log "$STREAM_LOG"; then
-    log_event "error" "provider_failed" "Claude provider failed."
-    echo "Fresh Eyes: $PROVIDER_LABEL failed. See log: $LOG_FILE" >&2
-    [[ -s "$LOG_FILE.stderr" ]] && cat "$LOG_FILE.stderr" >&2
-    exit 1
-  fi
-  log_event "info" "provider_completed" "Claude provider completed."
-}
-```
-
-- [ ] **Step 4: Replace `run_claude_automatic`**
-
-Replace the full `run_claude_automatic()` function with:
-
-```bash
-run_claude_automatic() {
-  local output_file="$1"
-  local json_schema
-  json_schema=$(cat "$SCHEMA_FILE")
-
-  log_event "info" "provider_started" "Starting Claude provider in stream-json automatic mode."
-  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
-    --model "$MODEL" \
-    --effort "$REASONING_EFFORT" \
-    --output-format stream-json \
-    --verbose \
-    --include-partial-messages \
-    --disable-slash-commands \
-    --json-schema "$json_schema" \
-    --allowedTools "$CLAUDE_TOOLS" \
-    --dangerously-skip-permissions \
-    "$PROMPT" 2>"$LOG_FILE.stderr" \
-    | python3 "$SCRIPT_DIR/fresheyes-claude-stream.py" \
-      --mode automatic \
-      --review-log "$LOG_FILE" \
-      --event-log "$EVENT_LOG" \
-      --stream-log "$STREAM_LOG" \
-      --automatic-output "$output_file"; then
-    log_event "error" "provider_failed" "Claude provider failed."
-    echo "Fresh Eyes: $PROVIDER_LABEL failed. Commit blocked." >&2
-    echo "Full log: $LOG_FILE" >&2
-    [[ -s "$LOG_FILE.stderr" ]] && cat "$LOG_FILE.stderr" >&2
-    exit 1
-  fi
-  log_event "info" "provider_completed" "Claude provider completed."
-}
-```
-
-Remove the old Python post-processing block from `run_claude_automatic`; the new parser writes `"$output_file"` directly.
-
-- [ ] **Step 5: Run syntax checks**
+- Do not add `--bare`.
+- Keep the existing auth environment behavior unless a separate requirement changes it.
+- Pipe Claude stdout to `fresheyes-claude-stream.py`.
+- Redirect Claude stderr to `$LOG_FILE.stderr`.
+- Use `--` before the prompt if any variadic Claude options make argument parsing ambiguous. The local validation found `--tools` can swallow the prompt without `--`.
+- Change `run_claude_automatic` the same way and pass `--json-schema "$json_schema"`.
+- Remove the old Claude automatic post-processing block that expected a JSON envelope from `--output-format json`.
+- Ensure parser output still reaches caller stdout for manual reviews.
 
 Run:
 
 ```bash
 bash -n skills/fresheyes/fresheyes.sh
-python3 -m py_compile skills/fresheyes/fresheyes-claude-stream.py
-```
-
-Expected: both commands exit with status `0`.
-
-- [ ] **Step 6: Run Claude provider tests**
-
-Run:
-
-```bash
+PYTHON=".venv-wsl/bin/python"; [[ -x "$PYTHON" ]] || PYTHON="python3"
+"$PYTHON" -m py_compile skills/fresheyes/fresheyes-claude-stream.py
 bash tests/fresheyes-claude-provider-test.sh
 ```
 
-Expected: `fresheyes Claude provider tests passed`.
-
-- [ ] **Step 7: Commit the Claude wiring**
+Commit:
 
 ```bash
 git add skills/fresheyes/fresheyes.sh skills/fresheyes/fresheyes-claude-stream.py tests/fresheyes-claude-provider-test.sh
 git commit -m "feat: stream Claude provider progress"
 ```
 
-## Task 5: Update Progress Reporting
+## Task 5: Rewrite Progress Resolution and Reporting
 
 **Files:**
-- Modify: `skills/fresheyes/fresheyes-progress.sh`
-- Test: `tests/fresheyes-progress-test.sh`
 
-- [ ] **Step 1: Add event-log progress reporting**
+- Modify `skills/fresheyes/fresheyes-progress.sh`.
+- Test with `tests/fresheyes-progress-test.sh`.
 
-In `skills/fresheyes/fresheyes-progress.sh`, replace the final line:
+Implementation requirements:
 
-```bash
-wc -l < "$LOG_FILE"
+1. Replace `_find_log` with a base-path resolver.
+
+The resolver should:
+
+- Prefer `.active.$PID` if present.
+- Return the active path if any related file exists:
+  - `$base`
+  - `$base.events.jsonl`
+  - `$base.stream.jsonl`
+  - `$base.stderr`
+- Fall back to globs by PID for all related file types, normalizing sidecar paths back to the base `.log` path.
+
+2. Add safe helper functions.
+
+Required helpers:
+
+- `line_count_or_zero "$base"`: print numeric line count if `.log` exists, otherwise `0`.
+- `cat_if_nonempty "$base"`: print `.log` only if it exists and is non-empty.
+- `event_log_provider "$base"`: read `.events.jsonl` and return the last known `provider`, ignoring malformed lines.
+- `print_claude_running_status "$base"`: summarize Claude provider events only.
+- `print_failure_diagnostic "$base"`: print a concise failure report from events/stderr/stream-log presence.
+
+3. Alive behavior.
+
+- If provider is Claude, print Claude event status.
+- Otherwise print numeric `.log` line count with `line_count_or_zero`.
+- Never fail with `No such file or directory` when `.log` is missing.
+
+4. Dead behavior.
+
+- If `.log` is non-empty, print it and remove `.active.$PID`.
+- If `.log` is empty or missing, print diagnostic output and remove `.active.$PID`.
+- If no base or sidecar can be found, keep the existing `0` behavior.
+
+5. Claude status format.
+
+Use a stable single-line format:
+
+```text
+running provider=claude provider_events=<n> last_provider_event=<name> final_lines=<n>
 ```
 
-with this complete block:
+Optional fields can be appended:
 
-```bash
-EVENT_LOG="$LOG_FILE.events.jsonl"
+- `stream_event_type=<type>`
+- `tool=<name>`
+- `subtype=<subtype>`
+- `status=<status>`
 
-if [[ -f "$EVENT_LOG" ]]; then
-  python3 - "$LOG_FILE" "$EVENT_LOG" <<'PY'
-from __future__ import annotations
+Do not include wrapper-only heartbeat events in `provider_events`.
 
-import json
-import sys
-from pathlib import Path
+6. Diagnostic format.
 
-log_file = Path(sys.argv[1])
-event_log = Path(sys.argv[2])
+Use a concise multi-line diagnostic:
 
-events = []
-with event_log.open("r", encoding="utf-8") as handle:
-    for line in handle:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            events.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
+```text
+Fresh Eyes review failed before final output.
 
-final_lines = 0
-if log_file.exists():
-    with log_file.open("r", encoding="utf-8") as handle:
-        final_lines = sum(1 for _ in handle)
+provider=claude
+last_event=<event>
+last_error=<event-or-message>
 
-last = events[-1] if events else {}
-provider = last.get("provider", "unknown")
-last_event = last.get("event", "none")
-parts = [
-    "running",
-    f"provider={provider}",
-    f"events={len(events)}",
-    f"last_event={last_event}",
-    f"final_lines={final_lines}",
-]
-
-stream_event_type = last.get("stream_event_type")
-if stream_event_type:
-    parts.append(f"stream_event_type={stream_event_type}")
-
-tool = last.get("tool")
-if tool:
-    parts.append(f"tool={tool}")
-
-subtype = last.get("subtype")
-if subtype:
-    parts.append(f"subtype={subtype}")
-
-print(" ".join(parts))
-PY
-  exit 0
-fi
-
-wc -l < "$LOG_FILE"
+stderr:
+<last stderr lines if any>
 ```
 
-- [ ] **Step 2: Run progress tests**
+If provider cannot be determined, use `provider=unknown`.
 
 Run:
 
 ```bash
+bash -n skills/fresheyes/fresheyes-progress.sh
 bash tests/fresheyes-progress-test.sh
-```
-
-Expected: `fresheyes progress tests passed`.
-
-- [ ] **Step 3: Run Claude provider tests again**
-
-Run:
-
-```bash
 bash tests/fresheyes-claude-provider-test.sh
 ```
 
-Expected: `fresheyes Claude provider tests passed`.
-
-- [ ] **Step 4: Commit progress reporting**
+Commit:
 
 ```bash
 git add skills/fresheyes/fresheyes-progress.sh tests/fresheyes-progress-test.sh
-git commit -m "feat: report Claude event progress"
+git commit -m "fix: report Claude sidecar progress safely"
 ```
 
-## Task 6: Fix Skill Polling and Cleanup Instructions
+## Task 6: Update Skill Polling and Cleanup Instructions
 
 **Files:**
-- Modify: `skills/fresheyes/SKILL.md`
 
-- [ ] **Step 1: Replace the output description**
+- Modify `skills/fresheyes/SKILL.md`.
 
-In `skills/fresheyes/SKILL.md`, replace the current "While the review is running" example with:
+Required documentation changes:
 
-```markdown
-**While the review is running:**
-```
+- Replace alive numeric-only examples with both shapes:
+
 ```text
 alive
-running provider=claude events=42 last_event=provider_event final_lines=0 stream_event_type=tool_result
-```
-```markdown
-
-For GPT or older logs, `fresheyes-progress.sh` may still return a numeric line count while the process is alive.
+running provider=claude provider_events=42 last_provider_event=tool_result final_lines=0
 ```
 
-- [ ] **Step 2: Replace the interpretation rules**
-
-Replace the four bullets under "Step 6: Interpret and act" with:
-
-```markdown
-- **`alive` + `running ...` status** -> review is active. Keep polling every 2 minutes.
-- **`alive` + numeric line count** -> legacy/GPT progress. Keep polling every 2 minutes.
-- **`dead` + review text** -> review completed. The text is the review. Proceed to Step 7.
-- **`dead` + `0` only** -> the review never started or crashed before producing output. Check for a log file directly with `ls "/tmp/fresheyes-logs/fresheyes-*-$FRESHPID.log"` and read the last lines for an error message.
+```text
+alive
+5270
 ```
 
-- [ ] **Step 3: Add process-group cleanup**
-
-Add this paragraph immediately after the interpretation rules:
-
-```markdown
-If you must stop a running review, kill the detached process group, not only the wrapper PID:
+- Interpret `running provider=claude ...` as active Claude provider progress.
+- Interpret numeric output as GPT or legacy progress.
+- Do not instruct agents to kill Claude reviews only because final `.log` line count is unchanged.
+- If a review must be stopped, instruct process-group cleanup:
 
 ```bash
-kill -- -$FRESHPID
+kill -- -$FRESHPID 2>/dev/null || kill $FRESHPID 2>/dev/null || true
 ```
 
-Do not kill a Claude review only because final output line count is unchanged. Claude reviews stream progress into `.events.jsonl` and may write the final `.log` only at completion.
-```
-
-- [ ] **Step 4: Remove incorrect heartbeat claim**
-
-Replace this sentence:
-
-```markdown
-`setsid` detaches the review from this call's process group so harness timeouts don't kill it. All output is written to the log file accessible via `fresheyes-progress.sh`. Startup messages and the heartbeat are captured in the log.
-```
-
-with:
-
-```markdown
-`setsid` detaches the review from this call's process group so harness timeouts don't kill it. Final review output is written to the `.log` file, and Claude progress is written to a structured `.events.jsonl` sidecar consumed by `fresheyes-progress.sh`.
-```
-
-- [ ] **Step 5: Run markdown sanity checks**
+- Remove claims that startup and heartbeat messages are captured in the final `.log`. Claude progress is in `.events.jsonl`.
+- Keep the reviewer-scope and provider-selection rules unchanged.
 
 Run:
 
 ```bash
-rg -n "line count unchanged|kill \\$FRESHPID|heartbeat are captured|5270" skills/fresheyes/SKILL.md
+rg -n "line count unchanged|heartbeat are captured|5270.*line count" skills/fresheyes/SKILL.md
+rg -n "kill \\$FRESHPID$|kill \"\\$FRESHPID\"$" skills/fresheyes/SKILL.md
 ```
 
-Expected: no output.
+Expected: no stale guidance except any intentional compatibility note about numeric progress. The second command is meant to catch a positive-PID-only kill instruction; the process-group command with fallback is expected to remain.
 
-- [ ] **Step 6: Commit skill instruction updates**
+Commit:
 
 ```bash
 git add skills/fresheyes/SKILL.md
-git commit -m "docs: update Fresheyes polling semantics"
+git commit -m "docs: update Fresheyes Claude polling guidance"
 ```
 
-## Task 7: Add README Note
+## Task 7: README Update
 
 **Files:**
-- Modify: `README.md`
 
-- [ ] **Step 1: Add one user-facing note**
+- Modify `README.md` only if there is a useful end-user-facing note.
 
-In `README.md`, under "Manual Mode", after this sentence:
+If adding a note, place it under Manual Mode after the current sentence that mentions the reviewer operating independently. The real file uses an em dash in that sentence, so do not use an ASCII-hyphen text replacement. Search for:
 
-```markdown
-By default, the skill picks a different model family from the one invoking it. The reviewer operates independently - it receives only the scope you give it, with no conversation context.
+```bash
+rg -n "reviewer operates independently" README.md
 ```
 
-add:
+Suggested note:
 
 ```markdown
-When launched in the background, Claude-provider reviews write live progress to structured sidecar logs and return the final review when complete.
+Claude-provider background reviews report live progress through structured sidecar logs and still return the final review text when complete.
 ```
 
-- [ ] **Step 2: Commit README update**
+Commit if changed:
 
 ```bash
 git add README.md
-git commit -m "docs: note Claude background progress logs"
+git commit -m "docs: note Claude background review progress"
 ```
 
-## Task 8: Final Verification
+## Task 8: Verification
 
-**Files:**
-- Verify: `skills/fresheyes/fresheyes.sh`
-- Verify: `skills/fresheyes/fresheyes-progress.sh`
-- Verify: `skills/fresheyes/fresheyes-claude-stream.py`
-- Verify: `tests/fresheyes-claude-provider-test.sh`
-- Verify: `tests/fresheyes-progress-test.sh`
-- Verify: `skills/fresheyes/SKILL.md`
-
-- [ ] **Step 1: Run shell syntax checks**
-
-Run:
+Run all verification commands:
 
 ```bash
 bash -n skills/fresheyes/fresheyes.sh
@@ -953,39 +515,13 @@ bash -n scripts/fresheyes-pre-commit.sh
 bash -n scripts/install-automatic-hook.sh
 bash -n tests/fresheyes-claude-provider-test.sh
 bash -n tests/fresheyes-progress-test.sh
-```
-
-Expected: every command exits with status `0`.
-
-- [ ] **Step 2: Run Python syntax checks**
-
-Run:
-
-```bash
-python3 -m py_compile skills/fresheyes/fresheyes-claude-stream.py
-```
-
-Expected: command exits with status `0`.
-
-- [ ] **Step 3: Run all tests**
-
-Run:
-
-```bash
-bash tests/fresheyes-claude-provider-test.sh
+PYTHON=".venv-wsl/bin/python"; [[ -x "$PYTHON" ]] || PYTHON="python3"
+"$PYTHON" -m py_compile skills/fresheyes/fresheyes-claude-stream.py
 bash tests/fresheyes-progress-test.sh
+bash tests/fresheyes-claude-provider-test.sh
 ```
 
-Expected:
-
-```text
-fresheyes Claude provider tests passed
-fresheyes progress tests passed
-```
-
-- [ ] **Step 4: Run a live low-risk Claude smoke test**
-
-Run this only after the fake-CLI tests pass:
+Run one live smoke test after fake CLI tests pass:
 
 ```bash
 tmpdir="$(mktemp -d)"
@@ -995,51 +531,35 @@ ls "$tmpdir/fresheyes-logs"/*.events.jsonl "$tmpdir/fresheyes-logs"/*.stream.jso
 
 Expected:
 
-```text
-## Files Examined
-...
-```
+- The live run prints a review.
+- `ls` prints one `.events.jsonl`, one `.stream.jsonl`, and one `.log`.
+- The event log includes Claude provider events before the final result.
 
-and the `ls` command prints one `.events.jsonl`, one `.stream.jsonl`, and one `.log` path.
-
-- [ ] **Step 5: Verify progress during a fake long-running review**
-
-Run:
+Inspect the final diff:
 
 ```bash
-bash tests/fresheyes-progress-test.sh
+git diff --stat
+git diff -- skills/fresheyes/fresheyes.sh skills/fresheyes/fresheyes-progress.sh skills/fresheyes/fresheyes-claude-stream.py skills/fresheyes/SKILL.md README.md tests
 ```
 
 Expected:
 
-```text
-fresheyes progress tests passed
-```
+- Changes are limited to the files in this plan.
+- GPT provider shell calls remain behaviorally unchanged.
+- Claude provider calls use `stream-json`, not `text` or `json`.
+- No Claude call uses `--bare`.
+- Progress tests include missing-`.log` sidecar cases.
+- Dead crash tests assert diagnostics, not `0`.
 
-- [ ] **Step 6: Inspect final diff**
+## Self-Review Checklist
 
-Run:
-
-```bash
-git diff --stat HEAD~7..HEAD
-git diff HEAD~7..HEAD -- skills/fresheyes/fresheyes.sh skills/fresheyes/fresheyes-progress.sh skills/fresheyes/fresheyes-claude-stream.py skills/fresheyes/SKILL.md README.md tests
-```
-
-Expected: changes are limited to the files named in this plan.
-
-- [ ] **Step 7: Final commit if execution was batched**
-
-If the executor batched tasks instead of committing per task, make one final commit:
-
-```bash
-git add README.md skills/fresheyes tests
-git commit -m "fix: stream Claude progress in Fresheyes"
-```
-
-Expected: commit succeeds.
-
-## Self-Review
-
-- Spec coverage: The plan fixes Claude generally by changing both `run_claude_manual` and `run_claude_automatic` to `stream-json`. It updates progress semantics, process cleanup instructions, ambient slash-command loading, and tests.
-- Placeholder scan: The plan uses concrete file paths, commands, expected outputs, and full code blocks for new files and replacement functions.
-- Type consistency: The parser writes `.events.jsonl` and `.stream.jsonl`; the runner uses the same paths; the progress script reads `.events.jsonl`; the tests assert those same names.
+- The plan no longer depends on final `.log` existence for live Claude progress.
+- The progress implementation is sidecar-aware end to end, including downstream `cat` and `wc` paths.
+- The tests do not mask the bug by pre-creating `.log` in the sidecar-only case.
+- GPT line-count progress is preserved.
+- Crash diagnostics are available through `fresheyes-progress.sh`.
+- Process-group cleanup is used for timeout stops.
+- `--bare` is excluded.
+- `--disable-slash-commands` is included for Claude.
+- Automatic mode reads `structured_output` from the final `stream-json` result.
+- All repo code that logs progress uses structured JSONL with severity.
