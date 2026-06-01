@@ -148,15 +148,60 @@ print(template.replace('{{REVIEW_SCOPE}}', sys.argv[2]))
 LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
+EVENT_LOG="$LOG_FILE.events.jsonl"
+STREAM_LOG="$LOG_FILE.stream.jsonl"
+STDERR_LOG="$LOG_FILE.stderr"
+
+if [[ "$PROVIDER" == "claude" ]]; then
+  : > "$LOG_FILE"
+  : > "$EVENT_LOG"
+  : > "$STREAM_LOG"
+  : > "$STDERR_LOG"
+fi
 
 echo "$LOG_FILE" > "$LOG_DIR/.active.$$"
 
+HEARTBEAT_PID=""
+
 _cleanup() {
   rm -f "$LOG_DIR/.active.$$"
-  kill "$HEARTBEAT_PID" 2>/dev/null || true
-  wait "$HEARTBEAT_PID" 2>/dev/null || true
+  if [[ -n "${HEARTBEAT_PID:-}" ]]; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+  fi
 }
 trap _cleanup EXIT
+
+log_event() {
+  local severity="$1"
+  local event="$2"
+  local message="${3:-}"
+
+  [[ "$PROVIDER" == "claude" ]] || return 0
+
+  python3 - "$EVENT_LOG" "$severity" "$event" "$PROVIDER" "$MODE" "$$" "$message" <<'PY'
+import json
+import sys
+import time
+
+path, severity, event, provider, mode, pid, message = sys.argv[1:8]
+record = {
+    "severity": severity,
+    "event": event,
+    "provider": provider,
+    "mode": mode,
+    "pid": int(pid),
+    "ts_epoch": time.time(),
+}
+if message:
+    record["message"] = message
+with open(path, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(record, separators=(",", ":"), sort_keys=True))
+    handle.write("\n")
+PY
+}
+
+log_event "info" "review_started" "Fresh Eyes review starting."
 
 echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please wait patiently." >&2
 
@@ -168,10 +213,11 @@ echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please w
 # Automatic functions write structured JSON to an output file.
 # The two providers handle structured output differently:
 #   GPT/Codex: --output-schema takes a file path; output is written directly in schema format.
-#   Claude:    --json-schema takes inline schema content; output is wrapped in a JSON envelope
-#              (under .structured_output), so we post-process to extract the inner object.
+#   Claude:    --json-schema takes inline schema content; stream-json output is parsed into the
+#              same schema-conforming output file.
 
 CLAUDE_TOOLS='Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep'
+CLAUDE_STREAM_PARSER="$SCRIPT_DIR/fresheyes-claude-stream.py"
 
 run_gpt_manual() {
   if ! codex exec \
@@ -207,17 +253,28 @@ run_gpt_automatic() {
 }
 
 run_claude_manual() {
+  log_event "info" "provider_started" "Claude manual review started."
   if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
     --model "$MODEL" \
     --effort "$REASONING_EFFORT" \
-    --output-format text \
+    --output-format stream-json \
+    --verbose \
+    --include-partial-messages \
+    --disable-slash-commands \
     --allowedTools "$CLAUDE_TOOLS" \
     --dangerously-skip-permissions \
-    "$PROMPT" 2>"$LOG_FILE.stderr" | tee "$LOG_FILE"; then
+    -- \
+    "$PROMPT" 2>"$STDERR_LOG" | python3 "$CLAUDE_STREAM_PARSER" \
+      --mode manual \
+      --review-log "$LOG_FILE" \
+      --event-log "$EVENT_LOG" \
+      --stream-log "$STREAM_LOG"; then
+    log_event "error" "provider_failed" "Claude manual review failed."
     echo "Fresh Eyes: $PROVIDER_LABEL failed. See log: $LOG_FILE" >&2
-    [[ -s "$LOG_FILE.stderr" ]] && cat "$LOG_FILE.stderr" >&2
+    [[ -s "$STDERR_LOG" ]] && cat "$STDERR_LOG" >&2
     exit 1
   fi
+  log_event "info" "provider_finished" "Claude manual review finished."
 }
 
 run_claude_automatic() {
@@ -226,29 +283,31 @@ run_claude_automatic() {
   local json_schema
   json_schema=$(cat "$SCHEMA_FILE")
 
+  log_event "info" "provider_started" "Claude automatic review started."
   if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
     --model "$MODEL" \
     --effort "$REASONING_EFFORT" \
-    --output-format json \
+    --output-format stream-json \
+    --verbose \
+    --include-partial-messages \
+    --disable-slash-commands \
     --json-schema "$json_schema" \
     --allowedTools "$CLAUDE_TOOLS" \
     --dangerously-skip-permissions \
-    "$PROMPT" 2>"$LOG_FILE.stderr" | tee "$LOG_FILE" > /dev/null; then
+    -- \
+    "$PROMPT" 2>"$STDERR_LOG" | python3 "$CLAUDE_STREAM_PARSER" \
+      --mode automatic \
+      --review-log "$LOG_FILE" \
+      --event-log "$EVENT_LOG" \
+      --stream-log "$STREAM_LOG" \
+      --automatic-output "$output_file"; then
+    log_event "error" "provider_failed" "Claude automatic review failed."
     echo "Fresh Eyes: $PROVIDER_LABEL failed. Commit blocked." >&2
     echo "Full log: $LOG_FILE" >&2
-    [[ -s "$LOG_FILE.stderr" ]] && cat "$LOG_FILE.stderr" >&2
+    [[ -s "$STDERR_LOG" ]] && cat "$STDERR_LOG" >&2
     exit 1
   fi
-
-  # Claude wraps structured output in a JSON envelope at .structured_output — extract it
-  python3 -c "
-import json, sys
-with open(sys.argv[1], 'r') as f:
-    envelope = json.load(f)
-inner = envelope.get('structured_output') or envelope.get('result', envelope)
-with open(sys.argv[2], 'w') as f:
-    json.dump(inner, f, indent=2)
-" "$LOG_FILE" "$output_file"
+  log_event "info" "provider_finished" "Claude automatic review finished."
 }
 
 # --- Heartbeat ---
@@ -256,7 +315,7 @@ with open(sys.argv[2], 'w') as f:
 _start_heartbeat() {
   (
     while true; do
-      sleep 300
+      sleep 300 >/dev/null 2>/dev/null
       echo "Fresh Eyes [$$]: review in progress..." >&2
     done
   ) &
@@ -264,8 +323,10 @@ _start_heartbeat() {
 }
 
 _stop_heartbeat() {
-  kill "$HEARTBEAT_PID" 2>/dev/null || true
-  wait "$HEARTBEAT_PID" 2>/dev/null || true
+  if [[ -n "${HEARTBEAT_PID:-}" ]]; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+  fi
 }
 
 # --- Dispatch ---
