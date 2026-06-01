@@ -97,5 +97,5 @@ List all files you examined, then report your findings:
 **INDEPENDENT CODE REVIEW [PASSED/FAILED]**
 ```
 
-Use **PASSED** if no blocking issues found (only cosmetic/nit issues or no issues).
+Use **PASSED** if no blocking issues found (only cosmetic/nit issues or no issues). When you mark a review **PASSED**, add a short note that if the invoking agent was instructed to iterate with Fresh Eyes, it should stop iterating because only minor/nit issues remain; Fresh Eyes may keep finding small improvements if asked to continue, so the goal is not to iterate until there is nothing left.
 Use **FAILED** if any blocking issues exist. Anything that isn't cosmetic or a nit is blocking.
