@@ -184,6 +184,8 @@ run_runner_capture() {
   shift 2
 
   if ! TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
     timeout 30s bash "$RUNNER" "$@" > "$stdout_file"; then
@@ -231,6 +233,29 @@ test_automatic_claude_extracts_structured_output() {
   assert_contains "$(cat "$(read_latest_file "$run_tmp" 'fresheyes-*.log.status.json')")" '"verdict":"approved"' "automatic Claude status"
 }
 
+test_default_log_dir_uses_global_log_dir() {
+  local run_tmp stdout_file log_file
+  run_tmp="$(mktemp -d "$TEST_TMP/default-log.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  mkdir -p "$run_tmp/tmp"
+  rm -f "$ARGV_FILE"
+
+  if ! TMPDIR="$run_tmp/tmp" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    timeout 30s bash "$RUNNER" --claude "Review README.md." > "$stdout_file"; then
+    printf 'Runner failed or timed out. stdout:\n' >&2
+    cat "$stdout_file" >&2 2>/dev/null || true
+    return 1
+  fi
+
+  log_file=$(ls -t "$run_tmp"/global-fresheyes-logs/fresheyes-*.log 2>/dev/null | head -1)
+  [[ -n "$log_file" ]] || fail "default log dir did not write to global log dir"
+  [[ ! -d "$run_tmp/tmp/fresheyes-logs" ]] || fail "default log dir unexpectedly used TMPDIR"
+  assert_contains "$(cat "$log_file.status.json")" '"state":"complete"' "default global log dir status"
+}
+
 test_parser_missing_result_writes_failure_log() {
   local run_tmp review_log event_log stream_log output status
   run_tmp="$(mktemp -d "$TEST_TMP/parser.XXXXXX")"
@@ -263,13 +288,14 @@ test_parser_missing_result_writes_failure_log() {
 }
 
 test_compound_launch_parent_pid_recovers_review() {
-  local run_tmp stdout_file captured_pid progress_output
+  local run_tmp stdout_file captured_pid progress_output status
   run_tmp="$(mktemp -d "$TEST_TMP/compound.XXXXXX")"
   stdout_file="$run_tmp/stdout.txt"
   rm -f "$ARGV_FILE"
 
   captured_pid=$(
     TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
@@ -280,12 +306,16 @@ test_compound_launch_parent_pid_recovers_review() {
 
   [[ "$captured_pid" =~ ^[0-9]+$ ]] || fail "compound launch did not return a pid: $captured_pid"
   for _ in {1..50}; do
+    set +e
     progress_output=$(
       TMPDIR="$run_tmp" \
+      FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
       FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
-      bash "$PROGRESS_SCRIPT" "$captured_pid"
+      bash "$PROGRESS_SCRIPT" --result "$captured_pid" 2>/dev/null
     )
-    if [[ "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 && "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
       return 0
     fi
     sleep 0.1
@@ -298,6 +328,7 @@ test_compound_launch_parent_pid_recovers_review() {
 make_fake_claude
 test_manual_claude_invocation_uses_streaming_flags
 test_automatic_claude_extracts_structured_output
+test_default_log_dir_uses_global_log_dir
 test_parser_missing_result_writes_failure_log
 test_compound_launch_parent_pid_recovers_review
 

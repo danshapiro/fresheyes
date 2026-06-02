@@ -57,7 +57,11 @@ assert_equals() {
 }
 
 run_progress() {
-  TMPDIR="$TEST_TMP" FRESHEYES_GLOBAL_LOG_DIR="$GLOBAL_LOG_DIR" bash "$PROGRESS_SCRIPT" "$@"
+  TMPDIR="$TEST_TMP" FRESHEYES_LOG_DIR="$LOG_DIR" FRESHEYES_GLOBAL_LOG_DIR="$GLOBAL_LOG_DIR" bash "$PROGRESS_SCRIPT" "$@"
+}
+
+run_progress_allow_legacy() {
+  TMPDIR="$TEST_TMP" FRESHEYES_LOG_DIR="$LOG_DIR" FRESHEYES_GLOBAL_LOG_DIR="$GLOBAL_LOG_DIR" FRESHEYES_ALLOW_LEGACY_PROGRESS=1 bash "$PROGRESS_SCRIPT" "$@"
 }
 
 json_field() {
@@ -117,6 +121,20 @@ write_active() {
   printf '%s\n' "$base" > "$LOG_DIR/.active.$pid"
 }
 
+write_legacy_active() {
+  local base="$1"
+  mkdir -p "$LOG_DIR"
+  printf '%s\n' "$base" > "$LOG_DIR/.active"
+}
+
+write_locator_alias() {
+  local pid="$1"
+  local base="$2"
+  local dir="${3:-$LOG_DIR}"
+  mkdir -p "$dir"
+  printf '%s\n' "$base" > "$dir/.locator.$pid"
+}
+
 write_parent_alias() {
   local parent_pid="$1"
   local base="$2"
@@ -141,11 +159,11 @@ test_alive_claude_sidecars_missing_log() {
   write_active "$pid" "$base"
   write_claude_events "$base"
 
-  output=$(run_progress "$pid")
-  assert_contains "$output" "running" "alive Claude missing log"
-  assert_contains "$output" "provider=claude" "alive Claude missing log"
-  assert_contains "$output" "provider_events=" "alive Claude missing log"
-  assert_contains "$output" "final_lines=0" "alive Claude missing log"
+  output=$(run_progress --json "$pid")
+  assert_json_field_equals "$output" "state" "running" "alive Claude missing log JSON state"
+  assert_json_field_equals "$output" "provider" "claude" "alive Claude missing log JSON provider"
+  assert_json_field_equals "$output" "provider_events" "2" "alive Claude missing log JSON provider events"
+  assert_json_field_equals "$output" "line_count" "0" "alive Claude missing log JSON line count"
 }
 
 test_alive_claude_sidecars_empty_log() {
@@ -156,23 +174,39 @@ test_alive_claude_sidecars_empty_log() {
   : > "$base"
   write_claude_events "$base"
 
-  output=$(run_progress "$pid")
-  assert_contains "$output" "running" "alive Claude empty log"
-  assert_contains "$output" "provider=claude" "alive Claude empty log"
-  assert_contains "$output" "provider_events=" "alive Claude empty log"
-  assert_contains "$output" "final_lines=0" "alive Claude empty log"
+  output=$(run_progress --json "$pid")
+  assert_json_field_equals "$output" "state" "running" "alive Claude empty log JSON state"
+  assert_json_field_equals "$output" "provider" "claude" "alive Claude empty log JSON provider"
+  assert_json_field_equals "$output" "provider_events" "2" "alive Claude empty log JSON provider events"
+  assert_json_field_equals "$output" "line_count" "0" "alive Claude empty log JSON line count"
 }
 
-test_alive_gpt_preserves_numeric_progress() {
+test_legacy_no_pid_preserves_numeric_progress() {
   local pid base output
+  start_live_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_legacy_active "$base"
+  printf 'one\ntwo\nthree\n' > "$base"
+  printf '%s\n' '{"severity":"info","event":"provider_event","provider":"gpt","ts_epoch":1}' > "$base.events.jsonl"
+
+  output=$(run_progress)
+  assert_equals "$output" "3" "legacy no-PID numeric progress"
+}
+
+test_bare_pid_legacy_output_is_rejected() {
+  local pid base output status
   start_live_pid pid
   base="$LOG_DIR/fresheyes-test-$pid.log"
   write_active "$pid" "$base"
   printf 'one\ntwo\nthree\n' > "$base"
-  printf '%s\n' '{"severity":"info","event":"provider_event","provider":"gpt","ts_epoch":1}' > "$base.events.jsonl"
 
-  output=$(run_progress "$pid")
-  assert_equals "$output" "3" "alive GPT numeric progress"
+  set +e
+  output=$(run_progress "$pid" 2>&1)
+  status=$?
+  set -e
+
+  assert_equals "$status" "2" "bare PID legacy output status"
+  assert_contains "$output" "requires --json or --result" "bare PID legacy output error"
 }
 
 test_alive_gpt_json_reports_running_progress() {
@@ -190,7 +224,7 @@ test_alive_gpt_json_reports_running_progress() {
 }
 
 test_alive_gpt_final_verdict_reports_complete() {
-  local pid base output result legacy
+  local pid base output result
   start_live_pid pid
   base="$LOG_DIR/fresheyes-test-$pid.log"
   write_active "$pid" "$base"
@@ -211,9 +245,6 @@ TEXT
 
   result=$(run_progress --result "$pid")
   assert_contains "$result" "INDEPENDENT CODE REVIEW PASSED" "alive GPT final verdict result"
-
-  legacy=$(run_progress "$pid")
-  assert_contains "$legacy" "INDEPENDENT CODE REVIEW PASSED" "alive GPT final verdict legacy output"
 }
 
 test_dead_success_returns_final_review() {
@@ -229,7 +260,7 @@ test_dead_success_returns_final_review() {
 INDEPENDENT CODE REVIEW PASSED
 TEXT
 
-  output=$(run_progress "$pid")
+  output=$(run_progress --result "$pid")
   assert_contains "$output" "## Files Examined" "dead success final text"
   assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "dead success final text"
 }
@@ -254,7 +285,7 @@ TEXT
 }
 
 test_dead_crash_missing_log_returns_diagnostics() {
-  local pid base output
+  local pid base output status
   dead_pid pid
   base="$LOG_DIR/fresheyes-test-$pid.log"
   write_active "$pid" "$base"
@@ -264,15 +295,19 @@ test_dead_crash_missing_log_returns_diagnostics() {
 JSON
   printf 'claude crashed while reading prompt\n' > "$base.stderr"
 
-  output=$(run_progress "$pid")
-  assert_not_equals "$output" "0" "dead missing log diagnostics"
+  set +e
+  output=$(run_progress --result "$pid")
+  status=$?
+  set -e
+
+  assert_not_equals "$status" "0" "dead missing log diagnostics status"
   assert_contains "$output" "Fresh Eyes review failed before final output" "dead missing log diagnostics"
   assert_contains "$output" "missing_result" "dead missing log diagnostics"
   assert_contains "$output" "claude crashed while reading prompt" "dead missing log diagnostics"
 }
 
 test_dead_crash_empty_log_returns_diagnostics() {
-  local pid base output
+  local pid base output status
   dead_pid pid
   base="$LOG_DIR/fresheyes-test-$pid.log"
   write_active "$pid" "$base"
@@ -283,8 +318,12 @@ test_dead_crash_empty_log_returns_diagnostics() {
 JSON
   printf 'schema output was empty\n' > "$base.stderr"
 
-  output=$(run_progress "$pid")
-  assert_not_equals "$output" "" "dead empty log diagnostics"
+  set +e
+  output=$(run_progress --result "$pid")
+  status=$?
+  set -e
+
+  assert_not_equals "$status" "0" "dead empty log diagnostics status"
   assert_contains "$output" "Fresh Eyes review failed before final output" "dead empty log diagnostics"
   assert_contains "$output" "structured_output_missing" "dead empty log diagnostics"
   assert_contains "$output" "schema output was empty" "dead empty log diagnostics"
@@ -298,10 +337,10 @@ test_dead_launcher_alias_to_live_owner_reports_running() {
   write_parent_alias "$parent_pid" "$base"
   write_claude_events "$base"
 
-  output=$(run_progress "$parent_pid")
-  assert_contains "$output" "running" "dead launcher alias live owner"
-  assert_contains "$output" "provider=claude" "dead launcher alias live owner"
-  assert_contains "$output" "final_lines=0" "dead launcher alias live owner"
+  output=$(run_progress --json "$parent_pid")
+  assert_json_field_equals "$output" "state" "running" "dead launcher alias live owner JSON state"
+  assert_json_field_equals "$output" "provider" "claude" "dead launcher alias live owner JSON provider"
+  assert_json_field_equals "$output" "line_count" "0" "dead launcher alias live owner JSON line count"
 }
 
 test_dead_launcher_alias_to_finished_owner_returns_review() {
@@ -318,12 +357,12 @@ test_dead_launcher_alias_to_finished_owner_returns_review() {
 INDEPENDENT CODE REVIEW FAILED
 TEXT
 
-  output=$(run_progress "$parent_pid")
+  output=$(run_progress --result "$parent_pid")
   assert_contains "$output" "## Files Examined" "dead launcher alias finished owner"
   assert_contains "$output" "INDEPENDENT CODE REVIEW FAILED" "dead launcher alias finished owner"
 }
 
-test_global_parent_alias_recovers_mismatched_tmpdir() {
+test_global_parent_alias_ignores_external_log_by_default() {
   local parent_pid owner_pid alt_log_dir base output
   dead_pid parent_pid
   dead_pid owner_pid
@@ -339,14 +378,41 @@ test_global_parent_alias_recovers_mismatched_tmpdir() {
 INDEPENDENT CODE REVIEW PASSED
 TEXT
 
-  output=$(run_progress "$parent_pid")
-  assert_contains "$output" "## Files Examined" "global parent alias mismatched tmpdir"
-  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global parent alias mismatched tmpdir"
+  output=$(run_progress --json "$parent_pid")
+  assert_json_field_equals "$output" "state" "missing" "global parent alias external log default state"
+
+  output=$(run_progress_allow_legacy --result "$parent_pid")
+  assert_contains "$output" "## Files Examined" "global parent alias legacy override"
+  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global parent alias legacy override"
+}
+
+test_global_locator_ignores_external_log_by_default() {
+  local pid alt_log_dir base output
+  dead_pid pid
+  alt_log_dir="$TEST_TMP/claude-1000/fresheyes-logs"
+  base="$alt_log_dir/fresheyes-test-$pid.log"
+  write_locator_alias "$pid" "$base" "$GLOBAL_LOG_DIR"
+  mkdir -p "$alt_log_dir"
+  cat > "$base" <<'TEXT'
+## Files Examined
+
+- README.md
+
+INDEPENDENT CODE REVIEW PASSED
+TEXT
+
+  output=$(run_progress --json "$pid")
+  assert_json_field_equals "$output" "state" "missing" "global locator external log default state"
+
+  output=$(run_progress_allow_legacy --result "$pid")
+  assert_contains "$output" "## Files Examined" "global locator legacy override"
+  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global locator legacy override"
 }
 
 test_alive_claude_sidecars_missing_log
 test_alive_claude_sidecars_empty_log
-test_alive_gpt_preserves_numeric_progress
+test_legacy_no_pid_preserves_numeric_progress
+test_bare_pid_legacy_output_is_rejected
 test_alive_gpt_json_reports_running_progress
 test_alive_gpt_final_verdict_reports_complete
 test_dead_success_returns_final_review
@@ -355,6 +421,7 @@ test_dead_crash_missing_log_returns_diagnostics
 test_dead_crash_empty_log_returns_diagnostics
 test_dead_launcher_alias_to_live_owner_reports_running
 test_dead_launcher_alias_to_finished_owner_returns_review
-test_global_parent_alias_recovers_mismatched_tmpdir
+test_global_parent_alias_ignores_external_log_by_default
+test_global_locator_ignores_external_log_by_default
 
 printf 'fresheyes-progress tests passed\n'

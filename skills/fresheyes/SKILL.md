@@ -79,6 +79,8 @@ Every 120 seconds, poll the progress script in JSON mode:
 bash "<base-directory>/fresheyes-progress.sh" --json "$FRESHPID"
 ```
 
+Do not call `fresheyes-progress.sh "$FRESHPID"` without `--json` or `--result`; bare PID polling is intentionally rejected because stale legacy progress can look like current output.
+
 The output is a single JSON object. Important fields include:
 
 - `state`: `running`, `complete`, `failed`, or `missing`.

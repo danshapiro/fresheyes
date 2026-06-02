@@ -145,8 +145,8 @@ print(template.replace('{{REVIEW_SCOPE}}', sys.argv[2]))
 " "$PROMPT_FILE" "$SCOPE_TEXT")
 
 # --- Log file setup ---
-LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
+LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
 EVENT_LOG="$LOG_FILE.events.jsonl"

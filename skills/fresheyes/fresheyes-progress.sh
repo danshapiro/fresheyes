@@ -3,14 +3,15 @@
 # Usage: fresheyes-progress.sh [--json|--result] [PID]
 #
 # Without PID: returns the line count of the legacy .active review (backward compat).
-# With PID:    returns progress for the review tracked by .active.$PID.
-#              If the process identified by PID is dead, outputs the full review
-#              log or a concise diagnostic assembled from sidecar logs.
+# With PID:    requires --json or --result by default. Bare PID output is disabled
+#              because it is easy to mistake stale or truncated legacy logs for
+#              current progress.
 # With --json: returns compact machine-readable status for polling.
 # With --result: returns final review text only after completion.
 
-LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
+LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
+ALLOW_LEGACY_PROGRESS="${FRESHEYES_ALLOW_LEGACY_PROGRESS:-0}"
 OUTPUT_MODE="legacy"
 PID=""
 
@@ -42,6 +43,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -n "$PID" && "$OUTPUT_MODE" == "legacy" && "$ALLOW_LEGACY_PROGRESS" != "1" ]]; then
+  echo "Error: PID polling requires --json or --result. Bare PID output is disabled to avoid stale or truncated Fresh Eyes progress." >&2
+  exit 2
+fi
 
 _base_from_related_path() {
   local path="$1"
@@ -101,6 +107,31 @@ _tracker_path() {
   _base_from_related_path "$tracked_path"
 }
 
+_path_is_under_dir() {
+  local path="$1"
+  local dir="${2%/}"
+  [[ "$path" == "$dir"/* ]]
+}
+
+_tracker_target_allowed() {
+  local dir="$1"
+  local tracked_path="$2"
+
+  if [[ "$ALLOW_LEGACY_PROGRESS" == "1" ]]; then
+    return 0
+  fi
+
+  if _path_is_under_dir "$tracked_path" "$dir"; then
+    return 0
+  fi
+
+  if _path_is_under_dir "$tracked_path" "$GLOBAL_LOG_DIR"; then
+    return 0
+  fi
+
+  return 1
+}
+
 _find_base_for_pid_in_dir() {
   local dir="$1"
   local pid="$2"
@@ -111,6 +142,9 @@ _find_base_for_pid_in_dir() {
 
   for tracker_file in "$dir/.active.$pid" "$dir/.locator.$pid"; do
     if tracked_path=$(_tracker_path "$tracker_file"); then
+      if ! _tracker_target_allowed "$dir" "$tracked_path"; then
+        continue
+      fi
       if _related_file_exists "$tracked_path"; then
         printf '%s\n' "$tracked_path"
         return 0
@@ -127,6 +161,9 @@ _find_base_for_pid_in_dir() {
   if [[ $(_process_state "$pid") != "active" ]]; then
     tracker_file="$dir/.parent.$pid"
     if tracked_path=$(_tracker_path "$tracker_file"); then
+      if ! _tracker_target_allowed "$dir" "$tracked_path"; then
+        return 1
+      fi
       printf '%s\n' "$tracked_path"
       return 0
     fi
@@ -160,7 +197,7 @@ _find_base_for_pid() {
   if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
     candidate_dirs+=("$GLOBAL_LOG_DIR")
   fi
-  if [[ -d /tmp/claude-1000/fresheyes-logs && "/tmp/claude-1000/fresheyes-logs" != "$LOG_DIR" && "/tmp/claude-1000/fresheyes-logs" != "$GLOBAL_LOG_DIR" ]]; then
+  if [[ "$ALLOW_LEGACY_PROGRESS" == "1" && -d /tmp/claude-1000/fresheyes-logs && "/tmp/claude-1000/fresheyes-logs" != "$LOG_DIR" && "/tmp/claude-1000/fresheyes-logs" != "$GLOBAL_LOG_DIR" ]]; then
     candidate_dirs+=("/tmp/claude-1000/fresheyes-logs")
   fi
 
@@ -563,7 +600,7 @@ print_result_or_pending() {
 }
 
 if [[ -n "$PID" ]]; then
-  LOG_FILE=$(_find_base_for_pid "$PID")
+  LOG_FILE=$(_find_base_for_pid "$PID" || true)
   if [[ -z "$LOG_FILE" ]]; then
     if [[ "$OUTPUT_MODE" == "json" ]]; then
       print_json_status "missing" "" "$PID" "" "$(_process_state "$PID")" "" "" "no tracked Fresh Eyes output found"
@@ -577,7 +614,7 @@ if [[ -n "$PID" ]]; then
     exit 0
   fi
 else
-  LOG_FILE=$(_find_legacy_base)
+  LOG_FILE=$(_find_legacy_base || true)
   if [[ -z "$LOG_FILE" ]]; then
     if [[ "$OUTPUT_MODE" == "json" ]]; then
       print_json_status "missing" "" "" "" "" "" "" "no active Fresh Eyes review found"
