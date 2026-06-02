@@ -73,58 +73,56 @@ Do not prefix the launch line with `cmd &&` before the trailing `&`. In Bash, `c
 
 ### Step 5: Poll every 2 minutes
 
-Every 120 seconds, run ONE bash call that checks liveness and progress:
+Every 120 seconds, poll the progress script in JSON mode:
 
 ```bash
-# Liveness check
-if kill -0 $FRESHPID 2>/dev/null; then
-  echo "alive"
-else
-  echo "dead"
-fi
-# Progress / results (provider status or line count if alive, full review or diagnostic if dead)
-bash "<base-directory>/fresheyes-progress.sh" $FRESHPID
+bash "<base-directory>/fresheyes-progress.sh" --json "$FRESHPID"
 ```
 
-The output is:
+The output is a single JSON object. Important fields include:
 
-**While a Claude-provider review is running:**
-```
-alive
-running provider=claude provider_events=42 last_provider_event=tool_result final_lines=0
-```
+- `state`: `running`, `complete`, `failed`, or `missing`.
+- `verdict`: `passed` or `failed` when a manual review has reached its final marker.
+- `pid_state`: `active`, `zombie`, `missing`, or `unknown`.
+- `owner_pid_state`: same values when the tracked PID was only a launcher and the real review PID is known.
+- `line_count`: current final-review log line count.
+- `last_log_mtime_epoch`: final-review log mtime.
+- `provider_events` and `last_provider_event`: Claude-provider stream progress when available.
+- `log_path`: the tracked review log.
 
-**While a GPT or legacy review is running:**
-```
-alive
-5270
-```
+Examples:
 
-**When the review has finished (success or crash):**
-```
-dead
-[full review text from fresheyes-progress.sh]
+```json
+{"state":"running","pid":12345,"pid_state":"active","line_count":5270,"last_log_mtime_epoch":1780376868}
 ```
 
-Note: `setsid` detaches the process from the shell's job control, so `wait` is unreliable. Rely on `kill -0` for liveness and the progress script for results.
+```json
+{"state":"complete","verdict":"passed","pid":12345,"pid_state":"active","line_count":4315,"result_available":true}
+```
+
+The progress script checks final review markers before process state. A review with `state=complete` is complete even if `pid_state` is still `active`.
 
 ### Step 6: Interpret and act
 
-- **`alive` + `running provider=claude ...`** → the Claude provider is active. `provider_events` counts model-originated stream events; wrapper heartbeats are not counted.
-- **`alive` + numeric output** → GPT or legacy progress. A growing count means output is increasing.
-- **`dead` + review text** → review completed. The text is the review. Proceed to Step 7.
-- **`dead` + diagnostic text** → the provider crashed before final output. Report the diagnostic text as returned.
-- **`dead` + `0` only** → the review never started or no tracked output existed. Report that no review output was available.
+- **`state=complete` + `verdict=passed`** → the review passed. Proceed to Step 7.
+- **`state=complete` + `verdict=failed`** → the review completed and found blocking issues. Proceed to Step 7.
+- **`state=running`** → continue polling.
+- **`state=failed`** → report the diagnostic evidence from the JSON and, if useful, Step 7's result command.
+- **`state=missing`** → report that no tracked review output was available, including the PID and `pid_state` from the JSON.
 
-If you must stop a review, clean up the process group first and fall back to the wrapper PID:
+Do not kill a Fresh Eyes process. If it appears stuck, escalate to the user with evidence instead of stopping it. Evidence should include at least two consecutive `--json` snapshots showing unchanged `line_count`, unchanged `last_log_mtime_epoch`, unchanged `provider_events` when present, and the relevant `pid_state` / `owner_pid_state` values.
 
-```bash
-kill -- -$FRESHPID 2>/dev/null || kill $FRESHPID 2>/dev/null || true
-```
+Never infer failure from terminal truncation, repeated code excerpts, or a live PID alone.
 
 ### Step 7: Report results
 
-Output the review response exactly as returned.
+When `state=complete`, fetch the final review text:
+
+```bash
+bash "<base-directory>/fresheyes-progress.sh" --result "$FRESHPID"
+```
+
+Output the review response exactly as returned. Do not report a running review as failed unless `--json` returns `state=failed`.
 
 ## Parallel reviews
 
@@ -138,4 +136,5 @@ Multiple fresheyes reviews can run simultaneously. Each invocation gets its own 
 - **Including provider in scope** — "Review using claude the staged changes" passes "using claude" as scope text. Provider goes as a flag (`--claude`), not in the scope string.
 - **Not polling** — The review takes 5-30 minutes. You must poll every 2 minutes until it completes.
 - **Doing it yourself** — either use the process here, or notify the user. Do not try a different approach.
-- **Opening the log** — Do not read, cat, tail, or grep the log file. Interact only through fresheyes-progress.sh and kill -0.
+- **Killing apparent stuck reviews** — do not stop the process. Escalate with two or more `--json` snapshots that show why it appears stuck.
+- **Opening the log** — Do not read, cat, tail, or grep the log file. Interact only through fresheyes-progress.sh.

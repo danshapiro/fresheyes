@@ -152,6 +152,7 @@ LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
 EVENT_LOG="$LOG_FILE.events.jsonl"
 STREAM_LOG="$LOG_FILE.stream.jsonl"
 STDERR_LOG="$LOG_FILE.stderr"
+STATUS_FILE="$LOG_FILE.status.json"
 
 if [[ "$PROVIDER" == "claude" ]]; then
   : > "$LOG_FILE"
@@ -178,8 +179,78 @@ if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
 fi
 
 HEARTBEAT_PID=""
+FINAL_STATUS_WRITTEN="0"
+
+manual_verdict_from_log() {
+  if [[ ! -f "$LOG_FILE" ]]; then
+    return 1
+  fi
+
+  python3 - "$LOG_FILE" <<'PY' 2>/dev/null
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    text = path.read_text(encoding="utf-8", errors="replace")
+except OSError:
+    sys.exit(1)
+
+verdict = ""
+for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
+    verdict = match.group(1).lower()
+
+if not verdict:
+    sys.exit(1)
+
+print(verdict)
+PY
+}
+
+write_status() {
+  local state="$1"
+  local exit_code="${2:-}"
+  local verdict="${3:-}"
+
+  python3 - "$STATUS_FILE" "$state" "$exit_code" "$verdict" "$PROVIDER" "$MODE" "$$" "$LOG_FILE" <<'PY'
+import json
+import os
+import sys
+import time
+
+path, state, exit_code, verdict, provider, mode, pid, log_path = sys.argv[1:9]
+record = {
+    "severity": "error" if state == "failed" else "info",
+    "state": state,
+    "provider": provider,
+    "mode": mode,
+    "pid": int(pid),
+    "log_path": log_path,
+    "updated_at_epoch": time.time(),
+}
+if exit_code:
+    record["exit_code"] = int(exit_code)
+if verdict:
+    record["verdict"] = verdict
+
+tmp_path = f"{path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    json.dump(record, handle, separators=(",", ":"), sort_keys=True)
+    handle.write("\n")
+os.replace(tmp_path, path)
+PY
+}
 
 _cleanup() {
+  local status=$?
+  if [[ "${FINAL_STATUS_WRITTEN:-0}" != "1" ]]; then
+    if [[ "$status" -eq 0 ]]; then
+      write_status "complete" "$status" "$(manual_verdict_from_log 2>/dev/null || true)" || true
+    else
+      write_status "failed" "$status" "" || true
+    fi
+  fi
   rm -f "$LOG_DIR/.active.$$"
   if [[ -n "${HEARTBEAT_PID:-}" ]]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
@@ -218,6 +289,7 @@ PY
 }
 
 log_event "info" "review_started" "Fresh Eyes review starting."
+write_status "running" "" ""
 
 echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please wait patiently." >&2
 
@@ -363,6 +435,7 @@ if [[ "$MODE" == "automatic" ]]; then
     exit 1
   fi
 
+  set +e
   python3 - "$OUTPUT_FILE" "$PROVIDER_LABEL" <<'PY'
 import json
 import sys
@@ -420,6 +493,13 @@ else:
 sys.exit(1)
 PY
   status=$?
+  set -e
+  if [[ "$status" -eq 0 ]]; then
+    write_status "complete" "$status" "approved"
+  else
+    write_status "failed" "$status" "not_approved"
+  fi
+  FINAL_STATUS_WRITTEN="1"
 
   echo ""
   echo "---"
@@ -432,6 +512,9 @@ case "$PROVIDER" in
   gpt)    run_gpt_manual ;;
   claude) run_claude_manual ;;
 esac
+
+write_status "complete" "0" "$(manual_verdict_from_log 2>/dev/null || true)"
+FINAL_STATUS_WRITTEN="1"
 
 # Output log file path AFTER review (so agents don't check it mid-stream)
 echo ""

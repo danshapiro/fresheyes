@@ -1,15 +1,47 @@
 #!/usr/bin/env bash
-# fresheyes-progress.sh - Check if a fresheyes review is still producing output.
-# Usage: fresheyes-progress.sh [PID]
+# fresheyes-progress.sh - Check Fresh Eyes review status or result.
+# Usage: fresheyes-progress.sh [--json|--result] [PID]
 #
 # Without PID: returns the line count of the legacy .active review (backward compat).
 # With PID:    returns progress for the review tracked by .active.$PID.
 #              If the process identified by PID is dead, outputs the full review
 #              log or a concise diagnostic assembled from sidecar logs.
+# With --json: returns compact machine-readable status for polling.
+# With --result: returns final review text only after completion.
 
 LOG_DIR="${TMPDIR:-/tmp}/fresheyes-logs"
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
-PID="${1:-}"
+OUTPUT_MODE="legacy"
+PID=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --json)
+      OUTPUT_MODE="json"
+      shift
+      ;;
+    --result)
+      OUTPUT_MODE="result"
+      shift
+      ;;
+    --)
+      shift
+      break
+      ;;
+    -*)
+      echo "Error: unknown option $1" >&2
+      exit 2
+      ;;
+    *)
+      if [[ -n "$PID" ]]; then
+        echo "Error: only one PID may be provided." >&2
+        exit 2
+      fi
+      PID="$1"
+      shift
+      ;;
+  esac
+done
 
 _base_from_related_path() {
   local path="$1"
@@ -34,6 +66,25 @@ _pid_from_base() {
     return 0
   fi
   return 1
+}
+
+_process_state() {
+  local pid="$1"
+  local stat
+
+  if [[ -z "$pid" ]]; then
+    printf 'unknown\n'
+    return 0
+  fi
+
+  stat=$(ps -o stat= -p "$pid" 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ -z "$stat" ]]; then
+    printf 'missing\n'
+  elif [[ "$stat" == *Z* ]]; then
+    printf 'zombie\n'
+  else
+    printf 'active\n'
+  fi
 }
 
 _tracker_path() {
@@ -73,7 +124,7 @@ _find_base_for_pid_in_dir() {
     fi
   done
 
-  if ! kill -0 "$pid" 2>/dev/null; then
+  if [[ $(_process_state "$pid") != "active" ]]; then
     tracker_file="$dir/.parent.$pid"
     if tracked_path=$(_tracker_path "$tracker_file"); then
       printf '%s\n' "$tracked_path"
@@ -129,13 +180,13 @@ _review_is_running() {
   local base="$2"
   local owner_pid
 
-  if kill -0 "$requested_pid" 2>/dev/null; then
+  if [[ $(_process_state "$requested_pid") == "active" ]]; then
     return 0
   fi
 
   owner_pid=$(_pid_from_base "$base" 2>/dev/null || true)
   if [[ -n "$owner_pid" && "$owner_pid" != "$requested_pid" ]]; then
-    if kill -0 "$owner_pid" 2>/dev/null; then
+    if [[ $(_process_state "$owner_pid") == "active" ]]; then
       return 0
     fi
   fi
@@ -176,6 +227,61 @@ cat_if_nonempty() {
   return 1
 }
 
+detect_manual_verdict() {
+  local base="$1"
+  if [[ ! -f "$base" ]]; then
+    return 1
+  fi
+
+  python3 - "$base" <<'PY' 2>/dev/null
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    text = path.read_text(encoding="utf-8", errors="replace")
+except OSError:
+    sys.exit(1)
+
+verdict = ""
+for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
+    verdict = match.group(1).lower()
+
+if not verdict:
+    sys.exit(1)
+
+print(verdict)
+PY
+}
+
+status_file_field() {
+  local base="$1"
+  local field="$2"
+  local status_file="$base.status.json"
+
+  if [[ ! -f "$status_file" ]]; then
+    return 1
+  fi
+
+  python3 - "$status_file" "$field" <<'PY' 2>/dev/null
+import json
+import sys
+
+path, field = sys.argv[1:3]
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+
+value = data.get(field) if isinstance(data, dict) else None
+if value in (None, ""):
+    sys.exit(1)
+print(value)
+PY
+}
+
 event_log_provider() {
   local base="$1"
   local event_log="$base.events.jsonl"
@@ -197,6 +303,115 @@ with open(sys.argv[1], encoding="utf-8") as handle:
         if isinstance(item, dict) and isinstance(item.get("provider"), str):
             provider = item["provider"]
 print(provider)
+PY
+}
+
+print_json_status() {
+  local state="$1"
+  local base="$2"
+  local requested_pid="$3"
+  local owner_pid="$4"
+  local requested_pid_state="$5"
+  local owner_pid_state="$6"
+  local verdict="$7"
+  local message="${8:-}"
+
+  python3 - "$state" "$base" "$requested_pid" "$owner_pid" "$requested_pid_state" "$owner_pid_state" "$verdict" "$message" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+state, base_arg, requested_pid, owner_pid, requested_pid_state, owner_pid_state, verdict, message = sys.argv[1:9]
+
+record = {"state": state}
+if message:
+    record["message"] = message
+if requested_pid:
+    try:
+        record["pid"] = int(requested_pid)
+    except ValueError:
+        record["pid"] = requested_pid
+if requested_pid_state:
+    record["pid_state"] = requested_pid_state
+if owner_pid:
+    try:
+        record["owner_pid"] = int(owner_pid)
+    except ValueError:
+        record["owner_pid"] = owner_pid
+if owner_pid_state:
+    record["owner_pid_state"] = owner_pid_state
+
+base = Path(base_arg) if base_arg else None
+status_data = {}
+provider_events = 0
+last_provider_event = ""
+
+if base is not None:
+    record["log_path"] = str(base)
+    if base.exists():
+        try:
+            record["line_count"] = sum(1 for _ in base.open(encoding="utf-8", errors="replace"))
+        except OSError:
+            record["line_count"] = 0
+        try:
+            record["last_log_mtime_epoch"] = int(base.stat().st_mtime)
+        except OSError:
+            pass
+    else:
+        record["line_count"] = 0
+
+    status_path = Path(str(base) + ".status.json")
+    if status_path.exists():
+        record["status_path"] = str(status_path)
+        try:
+            with status_path.open(encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if isinstance(loaded, dict):
+                status_data = loaded
+        except Exception:
+            status_data = {}
+
+    event_path = Path(str(base) + ".events.jsonl")
+    if event_path.exists():
+        try:
+            with event_path.open(encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    if not isinstance(item, dict):
+                        continue
+                    if isinstance(item.get("provider"), str) and item["provider"]:
+                        record["provider"] = item["provider"]
+                    if item.get("event") == "provider_event":
+                        provider_events += 1
+                        last_provider_event = (
+                            item.get("stream_event_type")
+                            or item.get("type")
+                            or item.get("event")
+                            or ""
+                        )
+        except OSError:
+            pass
+
+for key in ("provider", "mode", "exit_code", "updated_at_epoch"):
+    if key in status_data and key not in record:
+        record[key] = status_data[key]
+
+if "state" in status_data:
+    record["runner_state"] = status_data["state"]
+if provider_events:
+    record["provider_events"] = provider_events
+if last_provider_event:
+    record["last_provider_event"] = last_provider_event
+if verdict:
+    record["verdict"] = verdict
+elif isinstance(status_data.get("verdict"), str) and status_data["verdict"]:
+    record["verdict"] = status_data["verdict"]
+record["result_available"] = bool(record.get("verdict") and record.get("line_count", 0) > 0)
+
+print(json.dumps(record, separators=(",", ":"), sort_keys=True))
 PY
 }
 
@@ -324,21 +539,104 @@ elif event_log.exists() or stream_log.exists():
 PY
 }
 
+print_result_or_pending() {
+  local state="$1"
+  local base="$2"
+
+  case "$state" in
+    complete)
+      if cat_if_nonempty "$base"; then
+        return 0
+      fi
+      print_failure_diagnostic "$base"
+      return 1
+      ;;
+    failed)
+      print_failure_diagnostic "$base"
+      return 1
+      ;;
+    *)
+      printf 'Fresh Eyes review is not complete yet. Poll with --json for current status.\n'
+      return 1
+      ;;
+  esac
+}
+
 if [[ -n "$PID" ]]; then
   LOG_FILE=$(_find_base_for_pid "$PID")
   if [[ -z "$LOG_FILE" ]]; then
+    if [[ "$OUTPUT_MODE" == "json" ]]; then
+      print_json_status "missing" "" "$PID" "" "$(_process_state "$PID")" "" "" "no tracked Fresh Eyes output found"
+      exit 0
+    fi
+    if [[ "$OUTPUT_MODE" == "result" ]]; then
+      printf 'Fresh Eyes review output is not available.\n'
+      exit 1
+    fi
     echo "0"
     exit 0
   fi
 else
   LOG_FILE=$(_find_legacy_base)
   if [[ -z "$LOG_FILE" ]]; then
+    if [[ "$OUTPUT_MODE" == "json" ]]; then
+      print_json_status "missing" "" "" "" "" "" "" "no active Fresh Eyes review found"
+      exit 0
+    fi
+    if [[ "$OUTPUT_MODE" == "result" ]]; then
+      printf 'Fresh Eyes review output is not available.\n'
+      exit 1
+    fi
     echo "0"
     exit 0
   fi
 fi
 
-if [[ -n "$PID" ]] && ! _review_is_running "$PID" "$LOG_FILE"; then
+OWNER_PID=$(_pid_from_base "$LOG_FILE" 2>/dev/null || true)
+REQUESTED_PID_STATE=$(_process_state "$PID")
+OWNER_PID_STATE=""
+if [[ -n "$OWNER_PID" && "$OWNER_PID" != "$PID" ]]; then
+  OWNER_PID_STATE=$(_process_state "$OWNER_PID")
+fi
+
+VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
+STATUS_STATE=$(status_file_field "$LOG_FILE" "state" 2>/dev/null || true)
+STATUS_VERDICT=$(status_file_field "$LOG_FILE" "verdict" 2>/dev/null || true)
+if [[ -z "$VERDICT" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
+  VERDICT="$STATUS_VERDICT"
+fi
+
+if [[ -n "$VERDICT" || "$STATUS_STATE" == "complete" ]]; then
+  REVIEW_STATE="complete"
+elif [[ "$STATUS_STATE" == "failed" ]]; then
+  REVIEW_STATE="failed"
+elif [[ -n "$PID" ]] && _review_is_running "$PID" "$LOG_FILE"; then
+  REVIEW_STATE="running"
+elif [[ -n "$PID" ]]; then
+  REVIEW_STATE="failed"
+else
+  REVIEW_STATE="running"
+fi
+
+if [[ "$OUTPUT_MODE" == "json" ]]; then
+  print_json_status "$REVIEW_STATE" "$LOG_FILE" "$PID" "$OWNER_PID" "$REQUESTED_PID_STATE" "$OWNER_PID_STATE" "$VERDICT"
+  exit 0
+fi
+
+if [[ "$OUTPUT_MODE" == "result" ]]; then
+  print_result_or_pending "$REVIEW_STATE" "$LOG_FILE"
+  exit $?
+fi
+
+if [[ "$REVIEW_STATE" == "complete" ]]; then
+  if cat_if_nonempty "$LOG_FILE"; then
+    exit 0
+  fi
+  print_failure_diagnostic "$LOG_FILE"
+  exit 0
+fi
+
+if [[ "$REVIEW_STATE" == "failed" && -n "$PID" ]]; then
   rm -f "$LOG_DIR/.active.$PID"
   if cat_if_nonempty "$LOG_FILE"; then
     exit 0

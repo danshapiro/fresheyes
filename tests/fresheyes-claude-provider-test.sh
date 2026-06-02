@@ -208,7 +208,10 @@ test_manual_claude_invocation_uses_streaming_flags() {
   [[ -f "$log_file.events.jsonl" ]] || fail "missing event log"
   [[ -f "$log_file.stream.jsonl" ]] || fail "missing stream log"
   [[ -f "$log_file.stderr" ]] || fail "missing stderr log"
+  [[ -f "$log_file.status.json" ]] || fail "missing status file"
   [[ -f "$log_file" ]] || fail "missing final log"
+  assert_contains "$(cat "$log_file.status.json")" '"state":"complete"' "manual Claude status"
+  assert_contains "$(cat "$log_file.status.json")" '"verdict":"passed"' "manual Claude status"
 }
 
 test_automatic_claude_extracts_structured_output() {
@@ -224,6 +227,8 @@ test_automatic_claude_extracts_structured_output() {
   assert_contains "$output" "Fresh Eyes: approved." "automatic Claude output"
   output_file=$(read_latest_file "$run_tmp" 'fresheyes-automatic-*.json')
   assert_automatic_output_json "$output_file"
+  assert_contains "$(cat "$(read_latest_file "$run_tmp" 'fresheyes-*.log.status.json')")" '"state":"complete"' "automatic Claude status"
+  assert_contains "$(cat "$(read_latest_file "$run_tmp" 'fresheyes-*.log.status.json')")" '"verdict":"approved"' "automatic Claude status"
 }
 
 test_parser_missing_result_writes_failure_log() {
