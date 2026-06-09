@@ -53,23 +53,25 @@ The provider keyword controls which model runs the review. Do NOT include it in 
 
 If the model you chose throws an error, try another. If that also throws an error, stop and ask the user what to do. DO NOT CONTINUE IF YOU CANNOT FOLLOW THESE INSTRUCTIONS.
 
-### Step 4: Launch the reviewer in background
+### Step 4: Launch the reviewer
 
 The script path is `fresheyes.sh` inside this skill's base directory (shown at the top of these instructions).
 
-Launch it in a new session (so it survives if the harness kills this call) and capture its PID:
+Run it as a plain foreground command:
 
 ```bash
-setsid bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>" </dev/null >/dev/null 2>/dev/null &
-FRESHPID=$!
-echo "FRESHPID=$FRESHPID"
+bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
 ```
 
-`setsid` detaches the review from this call's process group so harness timeouts don't kill it. Review output and progress are accessible through `fresheyes-progress.sh`; Claude provider progress is tracked in structured sidecar logs.
+Manual reviews detach into their own session automatically, so this returns in under a second and prints a single line:
 
-Save `$FRESHPID`. This is your handle for the entire review lifecycle.
+```
+FRESHPID=12345
+```
 
-Do not prefix the launch line with `cmd &&` before the trailing `&`. In Bash, `cmd && setsid ... &` backgrounds the whole command list and `$!` can become a short-lived launcher shell instead of the review process. Run preflight commands separately, then launch Fresheyes exactly as its own background command.
+Read the number after `FRESHPID=` (just the digits, e.g. `12345` — not the whole `FRESHPID=12345` line) and save it as `$FRESHPID`. It is your handle for the entire review lifecycle (polling in Step 5, result retrieval in Step 7). Because the review runs in its own session, a harness timeout on this call cannot kill it; all output goes to log files reachable through `fresheyes-progress.sh` (Claude provider progress is also tracked in structured sidecar logs). If the command prints no `FRESHPID=` line — for example an error that `setsid` is not installed — do not proceed to Step 5; report the command's output to the user.
+
+Do not add `setsid`, a trailing `&`, output redirects, or `$!` — the script backgrounds itself. Run the command exactly as above and read `FRESHPID` from its output. (Adding `--foreground` would stream the review synchronously instead; you never want that here, because this call would then block and risk being killed by a harness timeout.)
 
 ### Step 5: Poll every 2 minutes
 
