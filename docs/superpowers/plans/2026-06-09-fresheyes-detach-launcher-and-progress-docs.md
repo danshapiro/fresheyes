@@ -16,7 +16,7 @@
 
 A less-capable agent consuming Fresh Eyes failed a review and misdiagnosed it. Ground truth from the code:
 
-- The review is **never** delivered on the script's stdout. GPT writes it to `$LOG_FILE` via `tee` (`fresheyes.sh:317`); Claude writes it through `fresheyes-claude-stream.py --review-log` (`fresheyes.sh:355`). Retrieval is by design through `fresheyes-progress.sh --result`. So the `>/dev/null` in the old launch line was correct, not a footgun.
+- The review is always written **durably** to `$LOG_FILE` — GPT via `tee` (`fresheyes.sh:317`), Claude via `fresheyes-claude-stream.py --review-log` (`fresheyes.sh:355`) — and is retrieved by design through `fresheyes-progress.sh --result`. Foreground manual mode *also* echoes the review to the script's stdout (the extraction at `fresheyes.sh:323`; Claude at `fresheyes-claude-stream.py:235`), but the skill's launch redirects that stdout to `/dev/null`. So the old launch line's `>/dev/null` discarded only a *duplicate* of the review, never its durable copy — it was correct, not a footgun.
 - The agent's real launch error was dropping `setsid`, so its review ran in the caller's process group and died when the 120s tool timeout fired. It also never waited and never ran `--result`.
 - It also tripped on two genuinely under-documented things: `result_available` (present in the JSON examples, absent from the Step 5 field list, easy to read as "tool failed") and `state=complete` + empty-`verdict` (not enumerated in Step 6).
 
@@ -177,19 +177,20 @@ In `tests/fresheyes-claude-provider-test.sh`, add these three functions immediat
 
 ```bash
 test_manual_detaches_by_default_and_completes() {
-  local run_tmp stdout_file fresh_pid progress_output status
+  local run_tmp stdout_file fresh_pid progress_output status self_sid child_sid
   run_tmp="$(mktemp -d "$TEST_TMP/detach.XXXXXX")"
   stdout_file="$run_tmp/stdout.txt"
   rm -f "$ARGV_FILE"
 
-  # Slow the fake provider so the review is provably still running when the
-  # launch call returns — proving it was backgrounded, not run synchronously.
+  # Slow the fake provider (2s) so the detached review is provably STILL RUNNING
+  # when the launch call returns. That gives us a window to (a) prove the launch
+  # returned before the provider completed, and (b) inspect the review's session.
   if ! TMPDIR="$run_tmp" \
     FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
-    FRESHEYES_FAKE_DELAY="0.3" \
+    FRESHEYES_FAKE_DELAY="2" \
     timeout 30s bash "$RUNNER" --claude "Review README.md." > "$stdout_file"; then
     printf 'Default manual launch failed or timed out. stdout:\n' >&2
     cat "$stdout_file" >&2 2>/dev/null || true
@@ -203,6 +204,28 @@ test_manual_detaches_by_default_and_completes() {
   fi
   fresh_pid=$(sed -n 's/^FRESHPID=//p' "$stdout_file" | tr -d '[:space:]')
   [[ "$fresh_pid" =~ ^[0-9]+$ ]] || fail "default manual launch printed no numeric FRESHPID: $(cat "$stdout_file")"
+
+  # SAFETY PROPERTY — the whole point of detach-by-default. The review must run
+  # in its OWN session, not the launcher's, so a caller's process-group/harness
+  # timeout cannot kill it. setsid makes the detached review a session leader
+  # (session id == its own PID); a plain `&` background WITHOUT setsid would
+  # leave it in this test's session (and killable) yet still print FRESHPID=,
+  # not stream, and complete — passing every other assertion here. So we must
+  # check the session explicitly, while the 2s fake provider keeps it alive.
+  self_sid=$(ps -o sess= -p "$$" | tr -d '[:space:]')
+  child_sid=""
+  for _ in {1..60}; do
+    child_sid=$(ps -o sess= -p "$fresh_pid" 2>/dev/null | tr -d '[:space:]')
+    [[ -n "$child_sid" ]] && break
+    sleep 0.05
+  done
+  [[ -n "$child_sid" ]] || fail "detached review pid $fresh_pid was not alive after launch; it was not backgrounded into its own session"
+  if [[ "$child_sid" == "$self_sid" ]]; then
+    fail "detached review shares the launcher's session ($child_sid); setsid did not detach it, so a caller timeout could still kill it"
+  fi
+  if [[ "$child_sid" != "$fresh_pid" ]]; then
+    fail "detached review is not its own session leader (sid=$child_sid pid=$fresh_pid); FRESHPID does not name the detached session"
+  fi
 
   # Detached review must complete and be retrievable by the printed PID.
   for _ in {1..100}; do
@@ -268,7 +291,7 @@ test_automatic_mode_does_not_detach
 - [ ] **Step 2: Run the suite and confirm the detach test fails**
 
 Run: `bash tests/fresheyes-claude-provider-test.sh`
-Expected: FAIL at `test_manual_detaches_by_default_and_completes` — manual mode currently runs synchronously, so the bare `--claude` launch streams the review to stdout and never prints `FRESHPID=`. The two guard tests (`test_manual_foreground_runs_synchronously`, `test_automatic_mode_does_not_detach`) pass already (manual/automatic are both synchronous today, and `--foreground` is currently ignored as scope text) — they exist to prove Step 3 does not over-reach.
+Expected: FAIL at `test_manual_detaches_by_default_and_completes` — manual mode currently runs synchronously, so the bare `--claude` launch streams the review to stdout and never prints `FRESHPID=`. It fails at the first assertion (`default manual detach stdout`), well before the new-session safety assertions; those become reachable only once Step 3 makes the launch actually detach. The two guard tests (`test_manual_foreground_runs_synchronously`, `test_automatic_mode_does_not_detach`) pass already (manual/automatic are both synchronous today, and `--foreground` is currently ignored as scope text) — they exist to prove Step 3 does not over-reach.
 
 - [ ] **Step 3: Implement the flag and default in `fresheyes.sh`, and migrate the existing tests**
 
@@ -416,7 +439,7 @@ bash tests/fresheyes-claude-provider-test.sh
 bash tests/fresheyes-progress-test.sh
 bash tests/fresheyes-prompt-contract-test.sh
 ```
-Expected: all three print their `… tests passed` line and exit 0. `test_manual_detaches_by_default_and_completes` now passes (bare `--claude` self-detaches and is recoverable by the printed PID); the three migrated tests pass with `--foreground`; `test_automatic_claude_extracts_structured_output` and the new `test_automatic_mode_does_not_detach` confirm the pre-commit/automatic path stays synchronous.
+Expected: all three print their `… tests passed` line and exit 0. `test_manual_detaches_by_default_and_completes` now passes — the bare `--claude` launch self-detaches into its **own session** (the test asserts the printed PID is a session leader whose session id differs from the launcher's, i.e. setsid actually escaped the caller's process group) and the review is then recoverable by that PID; the three migrated tests pass with `--foreground`; `test_automatic_claude_extracts_structured_output` and the new `test_automatic_mode_does_not_detach` confirm the pre-commit/automatic path stays synchronous.
 
 - [ ] **Step 5: Commit**
 
@@ -536,7 +559,7 @@ git commit -m "docs: note manual reviews detach by default; --foreground for syn
 **Spec coverage:**
 - "Document `result_available`" → Task A2 Step 1. ✓
 - "Step 6 doesn't enumerate `state=complete` with empty verdict" → Task A2 Step 2, behavior locked by Task A1. ✓
-- "Detach-by-default for manual mode so a stripped-down command is still safe" → Task B1 Edit 3d (condition gated on `MODE==manual && FOREGROUND!=1`), proved by `test_manual_detaches_by_default_and_completes`. ✓
+- "Detach-by-default for manual mode so a stripped-down command is still safe" → Task B1 Edit 3d (condition gated on `MODE==manual && FOREGROUND!=1`), proved by `test_manual_detaches_by_default_and_completes`. That test asserts the *safety property itself*, not just the symptom: the detached review's session id differs from the launcher's and equals its own PID (session leader) — so a plain `&` background without `setsid` (which would stay in the caller's session and remain killable by a harness timeout) fails the test even though it would still print `FRESHPID=`, not stream, and complete. ✓
 - "`--foreground` opt-out" → Task B1 Edit 3c + 3d, proved by `test_manual_foreground_runs_synchronously`. ✓
 - "Automatic/pre-commit path must stay synchronous" → block is `MODE==manual`-gated; guarded by `test_automatic_mode_does_not_detach` and the existing `test_automatic_claude_extracts_structured_output`. ✓
 - "Update the two (three) foreground tests" → Task B1 Edits 3e/3f/3g. ✓
@@ -545,7 +568,7 @@ git commit -m "docs: note manual reviews detach by default; --foreground for syn
 
 **Placeholder scan:** No TBD/"add error handling"/"similar to" — every test and edit shows full content with exact anchor text.
 
-**Type/identifier consistency:** Flag is `--foreground` (alias `--no-detach`); variable `FOREGROUND`; env guard `FRESHEYES_DAEMONIZED`; printed token `FRESHPID=` — consistent across impl (3b/3c/3d), tests (B1 Step 1, parsed via `sed -n 's/^FRESHPID=//p'`), and docs (B2/B3). The detached child's printed PID equals its own `$$` and its `fresheyes-<ts>-$$.log` filename via `setsid` exec-collapse in a non-job-control shell; if a platform's `setsid` instead forks, the existing `.parent.$PPID`/`owner_pid` recovery in `fresheyes-progress.sh` resolves it — so progress lookup by the printed PID holds either way. Test helpers used (`dead_pid`, `write_active`, `run_progress`, `assert_json_field_equals`, `assert_equals`, `assert_contains`, `run_runner_capture`, `fail`, `$RUNNER`, `$PROGRESS_SCRIPT`, `$FAKE_BIN`, `$ARGV_FILE`, `$TEST_TMP`, `make_fake_claude`) all exist in their target files.
+**Type/identifier consistency:** Flag is `--foreground` (alias `--no-detach`); variable `FOREGROUND`; env guard `FRESHEYES_DAEMONIZED`; printed token `FRESHPID=` — consistent across impl (3b/3c/3d), tests (B1 Step 1, parsed via `sed -n 's/^FRESHPID=//p'`), and docs (B2/B3). The detached child's printed PID equals its own `$$` and its `fresheyes-<ts>-$$.log` filename via `setsid` exec-collapse in a non-job-control shell; if a platform's `setsid` instead forks, the existing `.parent.$PPID`/`owner_pid` recovery in `fresheyes-progress.sh` resolves it — so progress lookup by the printed PID holds either way. The new session-leader assertion in `test_manual_detaches_by_default_and_completes` (`sid==pid`) is predicated on that exec-collapse, which was verified to hold in this project's Linux/WSL environment (a `bash script.sh` runs the runner with job control off, so the backgrounded `setsid` is not a process-group leader and execs in place rather than forking). This is the same supported-platform assumption as the existing `setsid`-required caveat below. Test helpers used (`dead_pid`, `write_active`, `run_progress`, `assert_json_field_equals`, `assert_equals`, `assert_contains`, `run_runner_capture`, `fail`, `$RUNNER`, `$PROGRESS_SCRIPT`, `$FAKE_BIN`, `$ARGV_FILE`, `$TEST_TMP`, `make_fake_claude`) all exist in their target files.
 
 **Known platform caveat (status quo, not a regression):** detach requires `setsid`; on a host without it (e.g. stock macOS), manual mode now errors with an actionable "re-run with `--foreground`" message. The previous SKILL.md launch line already required `setsid`, so this does not newly break any supported path; it surfaces the requirement explicitly instead of silently orphaning a process.
 
