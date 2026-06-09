@@ -201,7 +201,7 @@ test_manual_claude_invocation_uses_streaming_flags() {
   stdout_file="$run_tmp/stdout.txt"
   rm -f "$ARGV_FILE"
 
-  run_runner_capture "$run_tmp" "$stdout_file" --claude "Review README.md."
+  run_runner_capture "$run_tmp" "$stdout_file" --foreground --claude "Review README.md."
   output=$(cat "$stdout_file")
 
   assert_manual_argv
@@ -244,7 +244,7 @@ test_default_log_dir_uses_global_log_dir() {
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
-    timeout 30s bash "$RUNNER" --claude "Review README.md." > "$stdout_file"; then
+    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file"; then
     printf 'Runner failed or timed out. stdout:\n' >&2
     cat "$stdout_file" >&2 2>/dev/null || true
     return 1
@@ -300,7 +300,7 @@ test_compound_launch_parent_pid_recovers_review() {
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
     timeout 30s bash -c \
-      'true && setsid bash "$1" --claude "Review README.md." </dev/null > "$2" 2>/dev/null & echo "$!"' \
+      'true && setsid bash "$1" --foreground --claude "Review README.md." </dev/null > "$2" 2>/dev/null & echo "$!"' \
       bash "$RUNNER" "$stdout_file"
   )
 
@@ -325,11 +325,116 @@ test_compound_launch_parent_pid_recovers_review() {
   exit 1
 }
 
+test_manual_detaches_by_default_and_completes() {
+  local run_tmp stdout_file fresh_pid progress_output status self_sid child_sid
+  run_tmp="$(mktemp -d "$TEST_TMP/detach.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  rm -f "$ARGV_FILE"
+
+  # Slow the fake provider (2s) so the detached review is provably STILL RUNNING
+  # when the launch call returns. That gives us a window to (a) prove the launch
+  # returned before the provider completed, and (b) inspect the review's session.
+  if ! TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    FRESHEYES_FAKE_DELAY="2" \
+    timeout 30s bash "$RUNNER" --claude "Review README.md." > "$stdout_file"; then
+    printf 'Default manual launch failed or timed out. stdout:\n' >&2
+    cat "$stdout_file" >&2 2>/dev/null || true
+    return 1
+  fi
+
+  # Bare manual launch must self-detach and return only the PID line.
+  assert_contains "$(cat "$stdout_file")" "FRESHPID=" "default manual detach stdout"
+  if [[ "$(cat "$stdout_file")" == *"INDEPENDENT CODE REVIEW"* ]]; then
+    fail "default manual launch streamed the review instead of detaching: $(cat "$stdout_file")"
+  fi
+  fresh_pid=$(sed -n 's/^FRESHPID=//p' "$stdout_file" | tr -d '[:space:]')
+  [[ "$fresh_pid" =~ ^[0-9]+$ ]] || fail "default manual launch printed no numeric FRESHPID: $(cat "$stdout_file")"
+
+  # SAFETY PROPERTY — the whole point of detach-by-default. The review must run
+  # in its OWN session, not the launcher's, so a caller's process-group/harness
+  # timeout cannot kill it. setsid makes the detached review a session leader
+  # (session id == its own PID); a plain `&` background WITHOUT setsid would
+  # leave it in this test's session (and killable) yet still print FRESHPID=,
+  # not stream, and complete — passing every other assertion here. So we must
+  # check the session explicitly, while the 2s fake provider keeps it alive.
+  self_sid=$(ps -o sess= -p "$$" | tr -d '[:space:]')
+  child_sid=""
+  for _ in {1..60}; do
+    child_sid=$(ps -o sess= -p "$fresh_pid" 2>/dev/null | tr -d '[:space:]')
+    [[ -n "$child_sid" ]] && break
+    sleep 0.05
+  done
+  [[ -n "$child_sid" ]] || fail "detached review pid $fresh_pid was not alive after launch; it was not backgrounded into its own session"
+  if [[ "$child_sid" == "$self_sid" ]]; then
+    fail "detached review shares the launcher's session ($child_sid); setsid did not detach it, so a caller timeout could still kill it"
+  fi
+  if [[ "$child_sid" != "$fresh_pid" ]]; then
+    fail "detached review is not its own session leader (sid=$child_sid pid=$fresh_pid); FRESHPID does not name the detached session"
+  fi
+
+  # Detached review must complete and be retrievable by the printed PID.
+  for _ in {1..100}; do
+    set +e
+    progress_output=$(
+      TMPDIR="$run_tmp" \
+      FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+      FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+      bash "$PROGRESS_SCRIPT" --result "$fresh_pid" 2>/dev/null
+    )
+    status=$?
+    set -e
+    if [[ "$status" -eq 0 && "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  printf 'Detached review never returned final result. pid=%s output:\n%s\n' "$fresh_pid" "$progress_output" >&2
+  exit 1
+}
+
+test_manual_foreground_runs_synchronously() {
+  local run_tmp stdout_file output
+  run_tmp="$(mktemp -d "$TEST_TMP/foreground.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  rm -f "$ARGV_FILE"
+
+  run_runner_capture "$run_tmp" "$stdout_file" --foreground --claude "Review README.md."
+  output=$(cat "$stdout_file")
+
+  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "foreground manual streams review"
+  if [[ "$output" == *"FRESHPID="* ]]; then
+    fail "--foreground unexpectedly detached (printed FRESHPID): $output"
+  fi
+}
+
+test_automatic_mode_does_not_detach() {
+  local run_tmp stdout_file output
+  run_tmp="$(mktemp -d "$TEST_TMP/auto-nodetach.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  rm -f "$ARGV_FILE"
+
+  run_runner_capture "$run_tmp" "$stdout_file" --mode automatic --claude "Review staged changes."
+  output=$(cat "$stdout_file")
+
+  assert_contains "$output" "Fresh Eyes: approved." "automatic mode stays synchronous"
+  if [[ "$output" == *"FRESHPID="* ]]; then
+    fail "automatic mode unexpectedly detached (printed FRESHPID): $output"
+  fi
+}
+
 make_fake_claude
 test_manual_claude_invocation_uses_streaming_flags
 test_automatic_claude_extracts_structured_output
 test_default_log_dir_uses_global_log_dir
 test_parser_missing_result_writes_failure_log
 test_compound_launch_parent_pid_recovers_review
+test_manual_detaches_by_default_and_completes
+test_manual_foreground_runs_synchronously
+test_automatic_mode_does_not_detach
 
 printf 'fresheyes-claude-provider tests passed\n'

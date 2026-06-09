@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Fresh Eyes - Independent Code Review runner
-# Usage: ./fresheyes.sh [--gpt|--claude|--provider PROVIDER] [--manual|--automatic] 'scope text'
+# Usage: ./fresheyes.sh [--gpt|--claude|--provider PROVIDER] [--manual|--automatic] [--foreground] 'scope text'
+# Manual mode detaches into its own session by default (prints FRESHPID=<pid>); --foreground runs synchronously.
 
 set -euo pipefail
 
@@ -13,6 +14,13 @@ PROVIDER=""
 #               Designed for pre-commit hooks: structured {approve_commit, issues[]} output.
 MODE="${FRESHEYES_MODE:-manual}"
 SCOPE_PARTS=()
+# Manual reviews detach into their own session by default so a caller's process
+# group / harness timeout can't kill them. --foreground (alias --no-detach)
+# forces a synchronous run. Automatic mode never detaches.
+FOREGROUND=0
+# Capture argv verbatim before the parse loop consumes it, so the detach re-exec
+# can relaunch with identical arguments.
+ORIG_ARGS=("$@")
 
 # --- Argument parsing ---
 while [[ $# -gt 0 ]]; do
@@ -47,6 +55,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --automatic)
       MODE="automatic"
+      shift
+      ;;
+    --foreground|--no-detach)
+      FOREGROUND=1
       shift
       ;;
     --)
@@ -135,6 +147,24 @@ fi
 if [[ "$MODE" == "automatic" && ! -f "$SCHEMA_FILE" ]]; then
   echo "Error: Schema file not found: $SCHEMA_FILE" >&2
   exit 1
+fi
+
+# --- Detach manual reviews into their own session (default) ---
+# Manual reviews are long (5-30 min). By default we re-exec under setsid so the
+# review survives the caller's process group — e.g. an agent harness timeout on
+# the launch call. The foreground parent prints the review PID and exits in
+# under a second; the detached child runs the review and writes all output to
+# its log files, retrieved via fresheyes-progress.sh. FRESHEYES_DAEMONIZED=1
+# stops the child re-detaching. Automatic mode (the pre-commit gate) and
+# --foreground both skip this and run synchronously.
+if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}" != "1" ]]; then
+  if ! command -v setsid &> /dev/null; then
+    echo "Error: cannot detach the review: setsid (util-linux) not found. Re-run with --foreground to run synchronously." >&2
+    exit 2
+  fi
+  FRESHEYES_DAEMONIZED=1 setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>&1 &
+  echo "FRESHPID=$!"
+  exit 0
 fi
 
 # --- Build prompt ---
