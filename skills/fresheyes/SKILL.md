@@ -91,6 +91,7 @@ The output is a single JSON object. Important fields include:
 - `last_log_mtime_epoch`: final-review log mtime.
 - `provider_events` and `last_provider_event`: Claude-provider stream progress when available.
 - `log_path`: the tracked review log.
+- `result_available`: convenience boolean. `true` only when a final verdict marker **and** a non-empty log are both present. It is **not** a tool success/failure signal — a `false` value does not mean the review failed or that no text exists (a finished review can have retrievable text with `result_available=false`). Do not branch on this field; always retrieve the review with `--result` (Step 7).
 
 Examples:
 
@@ -108,6 +109,7 @@ The progress script checks final review markers before process state. A review w
 
 - **`state=complete` + `verdict=passed`** → the review passed. Proceed to Step 7.
 - **`state=complete` + `verdict=failed`** → the review completed and found blocking issues. Proceed to Step 7.
+- **`state=complete` with no `verdict`** → the review finished but emitted no PASSED/FAILED marker (`result_available` is `false`). This is **not** a tool failure. Run Step 7 (`--result`): it returns the review text when the log has content, or a failure diagnostic when it does not. Report exactly what `--result` returns.
 - **`state=running`** → continue polling.
 - **`state=failed`** → report the diagnostic evidence from the JSON and, if useful, Step 7's result command.
 - **`state=missing`** → report that no tracked review output was available, including the PID and `pid_state` from the JSON.
