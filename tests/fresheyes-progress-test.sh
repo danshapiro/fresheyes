@@ -284,6 +284,35 @@ TEXT
   assert_json_field_equals "$output" "result_available" "true" "dead success JSON result availability"
 }
 
+test_complete_without_verdict_returns_text() {
+  local pid base output result status
+  dead_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_active "$pid" "$base"
+  cat > "$base" <<'TEXT'
+## Files Examined
+
+- README.md
+
+The reviewer finished but emitted no PASSED or FAILED marker.
+TEXT
+  # Force the runner-written "complete" state without a verdict, exactly as a
+  # clean exit whose log lacks the verdict marker would record it.
+  printf '%s\n' '{"state":"complete","provider":"gpt","mode":"manual"}' > "$base.status.json"
+
+  output=$(run_progress --json "$pid")
+  assert_json_field_equals "$output" "state" "complete" "complete-no-verdict JSON state"
+  assert_json_field_equals "$output" "result_available" "false" "complete-no-verdict result availability"
+
+  set +e
+  result=$(run_progress --result "$pid")
+  status=$?
+  set -e
+  assert_equals "$status" "0" "complete-no-verdict --result exit status"
+  assert_contains "$result" "## Files Examined" "complete-no-verdict --result text"
+  assert_contains "$result" "no PASSED or FAILED marker" "complete-no-verdict --result body content"
+}
+
 test_dead_crash_missing_log_returns_diagnostics() {
   local pid base output status
   dead_pid pid
@@ -417,6 +446,7 @@ test_alive_gpt_json_reports_running_progress
 test_alive_gpt_final_verdict_reports_complete
 test_dead_success_returns_final_review
 test_dead_success_json_reports_complete
+test_complete_without_verdict_returns_text
 test_dead_crash_missing_log_returns_diagnostics
 test_dead_crash_empty_log_returns_diagnostics
 test_dead_launcher_alias_to_live_owner_reports_running
