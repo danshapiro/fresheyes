@@ -45,6 +45,8 @@ By default, the skill picks a different model family from the one invoking it. T
 
 Claude-provider reviews show live progress through the polling command and still return the final review text when complete.
 
+Manual reviews run in their own background session by default; the skill launches one, gets back a `FRESHPID`, and polls it to completion. If you invoke `fresheyes.sh` directly from a shell and want to watch the review stream live instead, pass `--foreground`.
+
 ## Automatic Mode (pre-commit)
 
 1. Install the plugin (same as above).
