@@ -1,86 +1,104 @@
 # Fresh Eyes
 
-Independent code review using a different AI model behind the curtain.
+Your AI coding agent is very sure it did a good job. Adorable. Maybe it's time for a second opinion?
 
-## Why?
+Fresh Eyes asks a separate LLM to look at your work. The separate agent helps because ["LLM Evaluators Recognize and Favor Their Own Generations"](https://arxiv.org/abs/2404.13076). The clean slate (no prior history) helps because LLMs with history may remember the goal more clearly than the code itself.
 
-Using the same model to review its own work has blind spots. Fresh Eyes sends your code to a completely independent model with zero context from your conversation — only the repo and the scope you give it. Model diversity improves correctness, so by default the skill picks a different model family from the one invoking it.
+It's pretty simple to use. `Look at this with fresheyes.`
 
-## Prerequisites
+## Install
 
-You need at least one of the following CLIs installed:
+Install the Fresh Eyes plugin in Claude Code:
 
-**Codex CLI** (for GPT provider):
-```bash
-npm install -g @openai/codex
-```
-
-**Claude Code CLI** (for Claude provider):
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-Run `codex` or `claude` to ensure the one you chose is properly set up.
-
-## Manual Mode
-
-In Claude Code, run:
-```
+```text
 /plugin marketplace add danshapiro/fresheyes
 /plugin install fresheyes@danshapiro-fresheyes
 ```
 
-**Important:** The reviewer only sees committed code. Commit your changes before invoking.
+Or Codex:
 
-In Claude Code:
+```bash
+git clone https://github.com/danshapiro/fresheyes.git
+mkdir -p ~/.codex/skills
+cp -R fresheyes/skills/fresheyes ~/.codex/skills/
+```
 
-- `Review this with fresh eyes` - Review staged changes (or last commit if nothing staged)
-- `Review commit abc1234 with fresh eyes` - Review a specific commit
-- `Review the files in src/auth/ with fresh eyes` - Review specific files
-- `Do a security review of src/auth/ with fresh eyes` - Scoped review (user intent passed through faithfully)
-- `Review with fresh eyes using claude` - Use Claude as the reviewer
-- `Review with fresh eyes using gpt` - Use GPT as the reviewer
+And, Fresh Eyes needs either Claude Code or Codex CLI to work its magic. 
 
-By default, the skill picks a different model family from the one invoking it. The reviewer operates independently — it receives only the scope you give it, with no conversation context.
+```bash
+npm install -g @openai/codex
+npm install -g @anthropic-ai/claude-code
+```
+Note that Claude reviews count against your Claude overage, not your subscription _(shakes fist at universe)_.
 
-Claude-provider reviews show live progress through the polling command and still return the final review text when complete.
+## How to do it:
 
-Manual reviews run in their own background session by default; the skill launches one, gets back a `FRESHPID`, and polls it to completion. If you invoke `fresheyes.sh` directly from a shell and want to watch the review stream live instead, pass `--foreground`.
+Fresh Eyes reviews what Git can show it. So:
 
-## Automatic Mode (pre-commit)
+1. Commit the work you want reviewed.
+2. Ask your agent to run Fresh Eyes.
 
-1. Install the plugin (same as above).
-2. Run the installer from your repo root (using the plugin path):
+Ask in normal language:
+
+> Review this (plan, checkin, worktree, whatever) with fresh eyes.
+
+Review and fix:
+
+> Review this with fresh eyes and fix anything it finds. Repeat up to three times or until it passes.
+
+(This is magic, and I do it all the time. Be sure to give it a limit or it could get stuck and burn all the tokens.)
+
+For a specific folder:
+
+> Do a security review of `src/auth/` with fresh eyes.
+
+For a finished branch:
+
+> Review this branch with fresh eyes, fix what comes up, and stop when it passes or after 5x turns.
+
+For a specific reviewer:
+
+> Review this with fresh eyes using Claude.
+
+> Review this with fresh eyes using GPT.
+
+You usually do not need to choose a reviewer. Fresh Eyes normally picks a different kind of model from the one already helping you. 
+
+## What Happens Next
+
+Your agent starts the review and waits for the result. A normal review can take a few minutes. Big branches and broad requests can take an hour.
+
+Fresh Eyes returns a review with a clear result:
+
+- `PASSED` means there are no blocking issues.
+- `FAILED` means it found something worth fixing before you move on.
+
+If it fails, fix the issues, commit again, and run Fresh Eyes again. If it passes, stop. A reviewer can always find small cleanup ideas if you keep asking, but a pass means the blocking problems are gone.
+
+## When It Helps
+
+I use Fresh Eyes most often in three places.
+
+After writing a plan, to catch issues. 
+
+After executing a plan (or making any sort of change), to find bugs.
+
+Before merging, it gives the branch one more independent read.
+
+## Optional Automatic Review
+
+You can make Fresh Eyes run before every commit. 
 
 ```bash
 cd /path/to/your/repo
 bash ~/.claude/plugins/fresheyes/scripts/install-automatic-hook.sh
 ```
 
-If your plugin directory is versioned, use that path instead:
+To skip the automatic review for one commit:
 
 ```bash
-cd /path/to/your/repo
-bash ~/.claude/plugins/fresheyes@danshapiro-fresheyes/scripts/install-automatic-hook.sh
+SKIP_FRESHEYES=1 git commit
 ```
-
-Optional overrides:
-- `SKIP_FRESHEYES=1 git commit` to bypass.
-- `FRESHEYES_SCOPE="Review the staged changes using git diff --cached."` to customize the scope.
-- `FRESHEYES_ROOT=/path/to/plugin` if the hook cannot find the plugin.
-
-Automatic mode uses medium reasoning effort and blocks the commit on blocking issues.
-
-## Configuration
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `FRESHEYES_PROVIDER` | Which provider to use (`gpt` or `claude`) | `gpt` |
-| `FRESHEYES_MODEL` | Override the model name | `gpt-5.5` (gpt) / `opus` (claude) |
-| `FRESHEYES_MODE` | Review mode (`manual` or `automatic`) | `manual` |
-| `SKIP_FRESHEYES` | Set to `1` to bypass pre-commit hook | unset |
-| `FRESHEYES_SCOPE` | Custom scope for pre-commit hook | unset |
-| `FRESHEYES_ROOT` | Override plugin root path | auto-detected |
 
 ## License
 
