@@ -264,6 +264,43 @@ cat_if_nonempty() {
   return 1
 }
 
+# GPT/Codex manual review logs hold the entire tee'd session transcript
+# (thousands of lines of commands and file reads); only the text from the
+# last "## Files Examined" header to EOF is the review itself. Claude logs
+# already contain only the final review text. Print the review, never the
+# raw transcript.
+print_final_review() {
+  local base="$1"
+  [[ -s "$base" ]] || return 1
+
+  local total start
+  total=$(LC_ALL=C wc -l < "$base" | tr -d '[:space:]')
+
+  # Small logs (Claude-provider results, short failure texts) are already
+  # just the final review; print them whole, as --result always did.
+  if (( total <= 400 )); then
+    cat "$base"
+    return 0
+  fi
+
+  # LC_ALL=C: macOS awk aborts mid-file on invalid multibyte sequences
+  # under UTF-8 locales, and codex transcripts can contain arbitrary bytes.
+  start=$(LC_ALL=C awk '/^## Files Examined/{n=NR} END{print n+0}' "$base" 2>/dev/null)
+
+  # The header also appears in the prompt echoed near the top of GPT
+  # transcripts; a match far from EOF is that echo, not the review. The
+  # real review section also carries a resolved verdict marker, which the
+  # echoed prompt template (bracketed "[PASSED/FAILED]") never does.
+  if [[ "$start" -gt 0 ]] && (( total - start < 500 )) \
+    && tail -n +"$start" "$base" | LC_ALL=C grep -Eq 'INDEPENDENT CODE REVIEW (PASSED|FAILED)'; then
+    tail -n +"$start" "$base"
+    return 0
+  fi
+  printf 'Fresh Eyes: could not isolate the final review section in a %s-line log; showing the last 120 lines to avoid dumping the raw session transcript. Full log: %s\n\n' "$total" "$base"
+  tail -n 120 "$base"
+  return 0
+}
+
 detect_manual_verdict() {
   local base="$1"
   if [[ ! -f "$base" ]]; then
@@ -582,7 +619,7 @@ print_result_or_pending() {
 
   case "$state" in
     complete)
-      if cat_if_nonempty "$base"; then
+      if print_final_review "$base"; then
         return 0
       fi
       print_failure_diagnostic "$base"

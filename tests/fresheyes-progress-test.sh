@@ -438,6 +438,73 @@ TEXT
   assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global locator legacy override"
 }
 
+test_result_extracts_final_review_from_gpt_transcript() {
+  local pid base result
+  dead_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_active "$pid" "$base"
+  # Reproduce the shape of a real detached GPT review log: run_gpt_manual tees
+  # the whole `codex exec` session into the log — banner, echoed prompt (which
+  # itself contains the "## Files Examined" output template), thousands of
+  # transcript lines — with the actual review only at the very end.
+  {
+    printf 'OpenAI Codex v0.0.0\nuser\nOutput template:\n## Files Examined\n## Issues Found\n'
+    for _ in $(seq 1 3000); do printf 'exec sed -n some/file transcript noise\n'; done
+    printf '## Files Examined\n- src/main.py\n\n## Issues Found\n- **major** src/main.py:10 - example\n\n## Summary\nExample.\n\n---\n**INDEPENDENT CODE REVIEW FAILED**\n'
+  } > "$base"
+
+  result=$(run_progress --result "$pid")
+  assert_contains "$result" "INDEPENDENT CODE REVIEW FAILED" "gpt transcript result verdict"
+  assert_contains "$result" "## Issues Found" "gpt transcript result findings"
+  assert_not_equals "$(printf '%s\n' "$result" | grep -c 'transcript noise')" "3000" "gpt transcript result excludes session transcript"
+  if (( $(printf '%s\n' "$result" | wc -l) > 100 )); then
+    fail "gpt transcript --result returned more than 100 lines; raw log leaked"
+  fi
+}
+
+test_result_caps_headerless_transcript() {
+  local pid base result
+  dead_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_active "$pid" "$base"
+  # A review that never emitted its "## Files Examined" header: --result must
+  # not dump the transcript; it prints a capped tail that keeps the verdict.
+  {
+    for _ in $(seq 1 3000); do printf 'transcript noise\n'; done
+    printf '**INDEPENDENT CODE REVIEW PASSED**\n'
+  } > "$base"
+
+  result=$(run_progress --result "$pid")
+  assert_contains "$result" "INDEPENDENT CODE REVIEW PASSED" "headerless transcript verdict retained"
+  assert_contains "$result" "could not isolate the final review" "headerless transcript cap notice"
+  if (( $(printf '%s\n' "$result" | wc -l) > 150 )); then
+    fail "headerless transcript --result returned more than 150 lines; raw log leaked"
+  fi
+}
+
+test_result_keeps_preamble_in_small_review_logs() {
+  local pid base result
+  dead_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_active "$pid" "$base"
+  # Claude-provider logs contain only the final review text, which may open
+  # with prose before the "## Files Examined" header. Small logs must print
+  # whole so that preamble is not lost.
+  cat > "$base" <<'TEXT'
+Summary first: the change looks correct overall.
+
+## Files Examined
+
+- README.md
+
+INDEPENDENT CODE REVIEW PASSED
+TEXT
+
+  result=$(run_progress --result "$pid")
+  assert_contains "$result" "Summary first" "small review log preamble retained"
+  assert_contains "$result" "INDEPENDENT CODE REVIEW PASSED" "small review log verdict"
+}
+
 test_alive_claude_sidecars_missing_log
 test_alive_claude_sidecars_empty_log
 test_legacy_no_pid_preserves_numeric_progress
@@ -453,5 +520,8 @@ test_dead_launcher_alias_to_live_owner_reports_running
 test_dead_launcher_alias_to_finished_owner_returns_review
 test_global_parent_alias_ignores_external_log_by_default
 test_global_locator_ignores_external_log_by_default
+test_result_extracts_final_review_from_gpt_transcript
+test_result_caps_headerless_transcript
+test_result_keeps_preamble_in_small_review_logs
 
 printf 'fresheyes-progress tests passed\n'
