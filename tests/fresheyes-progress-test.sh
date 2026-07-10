@@ -223,6 +223,26 @@ test_alive_gpt_json_reports_running_progress() {
   assert_json_field_equals "$output" "pid_state" "active" "alive GPT JSON pid state"
 }
 
+test_alive_gpt_incidental_verdict_while_running_reports_running() {
+  local pid base output
+  start_live_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_active "$pid" "$base"
+  cat > "$base" <<'TEXT'
+The reviewer is still inspecting a test fixture containing this text:
+## Files Examined
+- fixture.md
+INDEPENDENT CODE REVIEW PASSED
+The reviewer has not produced its own final response yet.
+TEXT
+  printf '%s\n' '{"state":"running","provider":"gpt","mode":"manual"}' > "$base.status.json"
+
+  output=$(run_progress --json "$pid")
+  assert_json_field_equals "$output" "state" "running" "alive GPT incidental verdict JSON state"
+  assert_json_field_equals "$output" "runner_state" "running" "alive GPT incidental verdict runner state"
+  assert_json_field_equals "$output" "result_available" "false" "alive GPT incidental verdict result availability"
+}
+
 test_alive_gpt_final_verdict_reports_complete() {
   local pid base output result
   start_live_pid pid
@@ -443,6 +463,7 @@ test_alive_claude_sidecars_empty_log
 test_legacy_no_pid_preserves_numeric_progress
 test_bare_pid_legacy_output_is_rejected
 test_alive_gpt_json_reports_running_progress
+test_alive_gpt_incidental_verdict_while_running_reports_running
 test_alive_gpt_final_verdict_reports_complete
 test_dead_success_returns_final_review
 test_dead_success_json_reports_complete

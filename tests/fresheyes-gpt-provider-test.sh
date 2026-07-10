@@ -31,6 +31,8 @@ if sys.argv[1:] == ["--version"]:
 with open(os.environ["FRESHEYES_FAKE_ARGV"], "w", encoding="utf-8") as handle:
     json.dump(sys.argv[1:], handle)
 
+for index in range(10_000):
+    print(f"fake Codex diagnostic line {index}")
 print("## Files Examined")
 print("- README.md")
 print("INDEPENDENT CODE REVIEW PASSED")

@@ -639,7 +639,12 @@ fi
 VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
 STATUS_STATE=$(status_file_field "$LOG_FILE" "state" 2>/dev/null || true)
 STATUS_VERDICT=$(status_file_field "$LOG_FILE" "verdict" 2>/dev/null || true)
-if [[ -z "$VERDICT" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
+if [[ "$STATUS_STATE" == "running" ]]; then
+  # Codex logs include inspected source and command output while the review is
+  # active. Those intermediate lines can contain verdict examples, so the
+  # runner's explicit state is authoritative until it finishes.
+  VERDICT=""
+elif [[ -z "$VERDICT" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
   VERDICT="$STATUS_VERDICT"
 fi
 

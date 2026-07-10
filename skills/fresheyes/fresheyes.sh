@@ -370,7 +370,17 @@ run_gpt_manual() {
     exit 1
   fi
   # Extract just the final review section (last occurrence of "## Files Examined" to end)
-  tac "$LOG_FILE" | sed '/^## Files Examined/q' | tac
+  python3 - "$LOG_FILE" <<'PY'
+import sys
+from pathlib import Path
+
+lines = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+start = 0
+for index, line in enumerate(lines):
+    if line.rstrip("\r\n") == "## Files Examined":
+        start = index
+sys.stdout.write("".join(lines[start:]))
+PY
 }
 
 run_gpt_automatic() {
