@@ -34,7 +34,9 @@ PATH="$FAKE_BIN:$PATH" \
   FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
   FRESHEYES_LOG_DIR="$TEST_TMP/logs" \
   FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/global-logs" \
-  timeout 30s bash "$RUNNER" --foreground --gpt "Review README.md." > "$STDOUT_FILE"
+  FRESHEYES_MODEL= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$STDOUT_FILE"
 
 python3 - "$ARGV_FILE" <<'PY'
 import json

@@ -29,6 +29,9 @@ And, Fresh Eyes needs either Claude Code or Codex CLI to work its magic.
 npm install -g @openai/codex
 npm install -g @anthropic-ai/claude-code
 ```
+
+GPT reviews use GPT-5.6 Sol with Extra High reasoning by default. Sol requires a Plus or higher Codex plan. On Free or Go, start Codex with `FRESHEYES_MODEL=gpt-5.6-terra` to use the GPT-5.6 model available on those plans.
+
 Note that Claude reviews count against your Claude overage, not your subscription _(shakes fist at universe)_.
 
 ## How to do it:
