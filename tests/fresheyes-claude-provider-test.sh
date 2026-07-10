@@ -126,6 +126,9 @@ require("--output-format")
 idx = argv.index("--output-format")
 if idx + 1 >= len(argv) or argv[idx + 1] != "stream-json":
     raise SystemExit(f"--output-format was not stream-json: {argv!r}")
+model_idx = argv.index("--model")
+if model_idx + 1 >= len(argv) or argv[model_idx + 1] != "opus":
+    raise SystemExit(f"GPT-specific override contaminated the Claude model: {argv!r}")
 for value in ["--verbose", "--include-partial-messages", "--disable-slash-commands"]:
     require(value)
 if "--bare" in argv:
@@ -186,6 +189,7 @@ run_runner_capture() {
   if ! TMPDIR="$run_tmp" \
     FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    FRESHEYES_GPT_MODEL="gpt-5.6-terra" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
     timeout 30s bash "$RUNNER" "$@" > "$stdout_file"; then

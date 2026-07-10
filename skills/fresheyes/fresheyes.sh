@@ -78,11 +78,11 @@ PROVIDER="${PROVIDER:-${FRESHEYES_PROVIDER:-gpt}}"
 
 case "$PROVIDER" in
   gpt)
-    MODEL="${FRESHEYES_MODEL:-gpt-5.6-sol}"
+    MODEL="${FRESHEYES_GPT_MODEL:-${FRESHEYES_MODEL:-gpt-5.6-sol}}"
     PROVIDER_LABEL="Codex"
     ;;
   claude)
-    MODEL="${FRESHEYES_MODEL:-opus}"
+    MODEL="${FRESHEYES_CLAUDE_MODEL:-${FRESHEYES_MODEL:-opus}}"
     PROVIDER_LABEL="Claude"
     ;;
   *)
@@ -97,6 +97,27 @@ if [[ "$PROVIDER" == "gpt" ]]; then
     echo "Error: codex CLI not found." >&2
     echo "Install it with: npm install -g @openai/codex" >&2
     exit 1
+  fi
+
+  if [[ "$MODEL" == gpt-5.6* ]]; then
+    MINIMUM_CODEX_VERSION="0.144.0"
+    if ! CODEX_VERSION_OUTPUT="$(codex --version 2>&1)"; then
+      echo "Error: unable to determine the Codex CLI version." >&2
+      echo "Update it with: npm install -g @openai/codex@latest" >&2
+      exit 1
+    fi
+    if [[ "$CODEX_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+      CODEX_VERSION="${BASH_REMATCH[1]}"
+    else
+      echo "Error: unable to parse the Codex CLI version from: $CODEX_VERSION_OUTPUT" >&2
+      echo "Update it with: npm install -g @openai/codex@latest" >&2
+      exit 1
+    fi
+    if [[ "$(printf '%s\n' "$MINIMUM_CODEX_VERSION" "$CODEX_VERSION" | sort -V | head -n 1)" != "$MINIMUM_CODEX_VERSION" ]]; then
+      echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
+      echo "Update it with: npm install -g @openai/codex@latest" >&2
+      exit 1
+    fi
   fi
 elif [[ "$PROVIDER" == "claude" ]]; then
   if ! command -v claude &> /dev/null; then
