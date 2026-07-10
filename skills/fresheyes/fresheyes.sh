@@ -82,7 +82,7 @@ case "$PROVIDER" in
     PROVIDER_LABEL="Codex"
     ;;
   claude)
-    MODEL="${FRESHEYES_CLAUDE_MODEL:-${FRESHEYES_MODEL:-opus}}"
+    MODEL="${FRESHEYES_CLAUDE_MODEL:-${FRESHEYES_MODEL:-claude-fable-5}}"
     PROVIDER_LABEL="Claude"
     ;;
   *)
@@ -90,6 +90,19 @@ case "$PROVIDER" in
     exit 1
     ;;
 esac
+
+version_at_least() {
+  python3 - "$1" "$2" <<'PY'
+import sys
+
+current_text, minimum_text = sys.argv[1:3]
+current_core_text, separator, _ = current_text.partition("-")
+current = tuple(int(part) for part in current_core_text.split("."))
+minimum = tuple(int(part) for part in minimum_text.split("."))
+supported = current > minimum or (current == minimum and not separator)
+raise SystemExit(0 if supported else 1)
+PY
+}
 
 # --- CLI prerequisite check ---
 if [[ "$PROVIDER" == "gpt" ]]; then
@@ -113,17 +126,7 @@ if [[ "$PROVIDER" == "gpt" ]]; then
       echo "Update it with: npm install -g @openai/codex@latest" >&2
       exit 1
     fi
-    if ! python3 - "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION" <<'PY'
-import sys
-
-current_text, minimum_text = sys.argv[1:3]
-current_core_text, separator, _ = current_text.partition("-")
-current = tuple(int(part) for part in current_core_text.split("."))
-minimum = tuple(int(part) for part in minimum_text.split("."))
-supported = current > minimum or (current == minimum and not separator)
-raise SystemExit(0 if supported else 1)
-PY
-    then
+    if ! version_at_least "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION"; then
       echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
       echo "Update it with: npm install -g @openai/codex@latest" >&2
       exit 1
@@ -134,6 +137,27 @@ elif [[ "$PROVIDER" == "claude" ]]; then
     echo "Error: claude CLI not found." >&2
     echo "Install it with: npm install -g @anthropic-ai/claude-code" >&2
     exit 1
+  fi
+
+  if [[ "$MODEL" == claude-fable-5* ]]; then
+    MINIMUM_CLAUDE_VERSION="2.1.170"
+    if ! CLAUDE_VERSION_OUTPUT="$(claude --version 2>&1)"; then
+      echo "Error: unable to determine the Claude Code version." >&2
+      echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
+      exit 1
+    fi
+    if [[ "$CLAUDE_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
+      CLAUDE_VERSION="${BASH_REMATCH[1]}"
+    else
+      echo "Error: unable to parse the Claude Code version from: $CLAUDE_VERSION_OUTPUT" >&2
+      echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
+      exit 1
+    fi
+    if ! version_at_least "$CLAUDE_VERSION" "$MINIMUM_CLAUDE_VERSION"; then
+      echo "Error: Claude Fable 5 requires Claude Code $MINIMUM_CLAUDE_VERSION or newer; found $CLAUDE_VERSION." >&2
+      echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
+      exit 1
+    fi
   fi
 fi
 
@@ -150,7 +174,6 @@ fi
 
 # --- Resolve mode-specific files ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GPT_RESULT_PARSER="$SCRIPT_DIR/fresheyes-gpt-result.py"
 PROMPT_FILE=""
 SCHEMA_FILE=""
 REASONING_EFFORT=""
@@ -211,6 +234,7 @@ GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
 mkdir -p "$LOG_DIR"
 LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
+RESULT_FILE="$LOG_FILE.result.md"
 EVENT_LOG="$LOG_FILE.events.jsonl"
 STREAM_LOG="$LOG_FILE.stream.jsonl"
 STDERR_LOG="$LOG_FILE.stderr"
@@ -244,10 +268,31 @@ HEARTBEAT_PID=""
 FINAL_STATUS_WRITTEN="0"
 
 manual_verdict_from_log() {
-  if [[ ! -f "$LOG_FILE" ]]; then
+  local review_file="$LOG_FILE"
+  if [[ "$PROVIDER" == "gpt" && -s "$RESULT_FILE" ]]; then
+    review_file="$RESULT_FILE"
+  fi
+  if [[ ! -f "$review_file" ]]; then
     return 1
   fi
-  python3 "$GPT_RESULT_PARSER" --verdict "$LOG_FILE" 2>/dev/null
+
+  python3 - "$review_file" <<'PY' 2>/dev/null
+import re
+import sys
+from pathlib import Path
+
+try:
+    text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(1)
+
+verdict = ""
+for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
+    verdict = match.group(1).lower()
+if not verdict:
+    raise SystemExit(1)
+print(verdict)
+PY
 }
 
 write_status() {
@@ -356,12 +401,16 @@ run_gpt_manual() {
     --model "$MODEL" \
     -c features.shell_snapshot=false \
     -c model_reasoning_effort="$REASONING_EFFORT" \
+    -o "$RESULT_FILE" \
     "$PROMPT" 2>&1 | tee "$LOG_FILE" > /dev/null; then
     echo "Fresh Eyes: $PROVIDER_LABEL failed. See log: $LOG_FILE" >&2
     exit 1
   fi
-  # Extract just the final review section (last occurrence of "## Files Examined" to end)
-  python3 "$GPT_RESULT_PARSER" --result "$LOG_FILE"
+  if [[ ! -s "$RESULT_FILE" ]]; then
+    echo "Fresh Eyes: $PROVIDER_LABEL produced no final review. See log: $LOG_FILE" >&2
+    exit 1
+  fi
+  cat "$RESULT_FILE"
 }
 
 run_gpt_automatic() {

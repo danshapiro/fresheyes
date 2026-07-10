@@ -11,8 +11,6 @@
 
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GPT_RESULT_PARSER="$SCRIPT_DIR/fresheyes-gpt-result.py"
 ALLOW_LEGACY_PROGRESS="${FRESHEYES_ALLOW_LEGACY_PROGRESS:-0}"
 OUTPUT_MODE="legacy"
 PID=""
@@ -272,14 +270,37 @@ detect_manual_verdict() {
     return 1
   fi
 
-  python3 "$GPT_RESULT_PARSER" --verdict "$base" 2>/dev/null
+  python3 - "$base" <<'PY' 2>/dev/null
+import re
+import sys
+from pathlib import Path
+
+try:
+    text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+except OSError:
+    raise SystemExit(1)
+
+verdict = ""
+for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
+    verdict = match.group(1).lower()
+if not verdict:
+    raise SystemExit(1)
+print(verdict)
+PY
 }
 
 print_final_review_if_nonempty() {
   local base="$1"
+  local provider mode
+  provider=$(status_file_field "$base" "provider" 2>/dev/null || true)
+  mode=$(status_file_field "$base" "mode" 2>/dev/null || true)
+  if [[ "$provider" == "gpt" && "$mode" == "manual" && -s "$base.result.md" ]]; then
+    cat "$base.result.md"
+    return 0
+  fi
   if [[ -s "$base" ]]; then
-    python3 "$GPT_RESULT_PARSER" --result "$base"
-    return $?
+    cat "$base"
+    return 0
   fi
   return 1
 }

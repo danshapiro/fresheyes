@@ -32,19 +32,22 @@ if sys.argv[1:] == ["--version"]:
 with open(os.environ["FRESHEYES_FAKE_ARGV"], "w", encoding="utf-8") as handle:
     json.dump(sys.argv[1:], handle)
 
-if "-o" in sys.argv:
+if "--output-schema" in sys.argv:
     output_path = sys.argv[sys.argv.index("-o") + 1]
     with open(output_path, "w", encoding="utf-8") as handle:
         json.dump({"approve_commit": True, "issues": []}, handle)
     print("fake automatic Codex review complete")
 else:
+    if "-o" in sys.argv:
+        output_path = sys.argv[sys.argv.index("-o") + 1]
+        with open(output_path, "w", encoding="utf-8") as handle:
+            handle.write("## Files Examined   \n")
+            handle.write("- README.md\n")
+            if os.environ.get("FRESHEYES_FAKE_OMIT_VERDICT") != "1":
+                handle.write("INDEPENDENT CODE REVIEW PASSED\n")
     for index in range(10_000):
         print(f"fake Codex diagnostic line {index}")
     if os.environ.get("FRESHEYES_FAKE_OMIT_VERDICT") == "1":
-        print("INDEPENDENT CODE REVIEW PASSED")
-    print("## Files Examined   ")
-    print("- README.md")
-    if os.environ.get("FRESHEYES_FAKE_OMIT_VERDICT") != "1":
         print("INDEPENDENT CODE REVIEW PASSED")
 PY
 chmod +x "$FAKE_BIN/codex"
@@ -78,6 +81,8 @@ if actual_model != "gpt-5.6-sol":
 
 if "model_reasoning_effort=xhigh" not in argv:
     raise SystemExit(f"manual GPT review did not use xhigh reasoning: {argv!r}")
+if "-o" not in argv:
+    raise SystemExit(f"manual GPT review did not request a last-message artifact: {argv!r}")
 PY
 
 if ! grep -q '^INDEPENDENT CODE REVIEW PASSED$' "$STDOUT_FILE"; then

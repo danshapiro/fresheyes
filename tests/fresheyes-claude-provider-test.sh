@@ -15,6 +15,7 @@ fi
 TEST_TMP="$(mktemp -d)"
 FAKE_BIN="$TEST_TMP/bin"
 ARGV_FILE="$TEST_TMP/claude-argv.json"
+VERSION_PROBE_FILE="$TEST_TMP/claude-version-probe.txt"
 mkdir -p "$FAKE_BIN"
 
 cleanup() {
@@ -44,6 +45,14 @@ import json
 import os
 import sys
 import time
+
+if sys.argv[1:] == ["--version"]:
+    probe = os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION_PROBE")
+    if probe:
+        with open(probe, "w", encoding="utf-8") as handle:
+            handle.write(os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION", "2.1.206"))
+    print(f"{os.environ.get('FRESHEYES_FAKE_CLAUDE_VERSION', '2.1.206')} (Claude Code)")
+    raise SystemExit(0)
 
 argv_file = os.environ["FRESHEYES_FAKE_ARGV"]
 with open(argv_file, "w", encoding="utf-8") as handle:
@@ -96,7 +105,14 @@ else:
         "type": "result",
         "subtype": "success",
         "is_error": False,
-        "result": "## Files Examined\n\n- README.md\n\nINDEPENDENT CODE REVIEW PASSED",
+        "result": (
+            "## Files Examined\n\n"
+            "- README.md\n\n"
+            "## Issues Found\n\n"
+            "- A fixture quotes this heading without replacing the review:"
+            "\n\n## Files Examined\n\n"
+            "INDEPENDENT CODE REVIEW PASSED"
+        ),
     })
 PY
   chmod +x "$FAKE_BIN/claude"
@@ -131,8 +147,11 @@ for value in ["--verbose", "--include-partial-messages", "--disable-slash-comman
 if "--bare" in argv:
     raise SystemExit(f"unexpected --bare: {argv!r}")
 model_idx = argv.index("--model")
-if model_idx + 1 >= len(argv) or argv[model_idx + 1] != "opus":
+if model_idx + 1 >= len(argv) or argv[model_idx + 1] != "claude-fable-5":
     raise SystemExit(f"Claude-specific override did not win: {argv!r}")
+effort_idx = argv.index("--effort")
+if effort_idx + 1 >= len(argv) or argv[effort_idx + 1] != "xhigh":
+    raise SystemExit(f"manual Claude review did not use xhigh effort: {argv!r}")
 if "--" not in argv:
     raise SystemExit(f"missing -- prompt separator: {argv!r}")
 if argv[-1].startswith("--") or "Review README.md." not in argv[-1]:
@@ -158,6 +177,12 @@ for value in [
         raise SystemExit(f"missing argv value: {value!r}\nargv={argv!r}")
 if "--bare" in argv:
     raise SystemExit(f"unexpected --bare: {argv!r}")
+model_idx = argv.index("--model")
+if model_idx + 1 >= len(argv) or argv[model_idx + 1] != "claude-fable-5":
+    raise SystemExit(f"automatic Claude review did not use Fable 5: {argv!r}")
+effort_idx = argv.index("--effort")
+if effort_idx + 1 >= len(argv) or argv[effort_idx + 1] != "medium":
+    raise SystemExit(f"automatic Claude review did not use medium effort: {argv!r}")
 if "--" not in argv:
     raise SystemExit(f"missing -- prompt separator: {argv!r}")
 if argv[-1].startswith("--") or "Review staged changes." not in argv[-1]:
@@ -190,8 +215,9 @@ run_runner_capture() {
     FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     FRESHEYES_GPT_MODEL="gpt-5.6-terra" \
-    FRESHEYES_CLAUDE_MODEL="opus" \
-    FRESHEYES_MODEL="legacy-model-must-not-win" \
+    FRESHEYES_CLAUDE_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_FAKE_CLAUDE_VERSION_PROBE="$VERSION_PROBE_FILE" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
     timeout 30s bash "$RUNNER" "$@" > "$stdout_file"; then
@@ -211,7 +237,9 @@ test_manual_claude_invocation_uses_streaming_flags() {
   output=$(cat "$stdout_file")
 
   assert_manual_argv
+  [[ -s "$VERSION_PROBE_FILE" ]] || fail "Fable 5 review did not verify the Claude Code version"
   assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "manual Claude output"
+  assert_contains "$output" "- README.md" "manual Claude output preserves the first files list"
   log_file=$(read_latest_file "$run_tmp" 'fresheyes-*.log')
   [[ -f "$log_file.events.jsonl" ]] || fail "missing event log"
   [[ -f "$log_file.stream.jsonl" ]] || fail "missing stream log"
@@ -322,6 +350,7 @@ test_compound_launch_parent_pid_recovers_review() {
     status=$?
     set -e
     if [[ "$status" -eq 0 && "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
+      assert_contains "$progress_output" "- README.md" "detached Claude result preserves the first files list"
       return 0
     fi
     sleep 0.1
@@ -433,6 +462,57 @@ test_automatic_mode_does_not_detach() {
   fi
 }
 
+test_fable_rejects_old_claude_code() {
+  local run_tmp stdout_file stderr_file status
+  run_tmp="$(mktemp -d "$TEST_TMP/old-claude.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  stderr_file="$run_tmp/stderr.txt"
+  rm -f "$ARGV_FILE"
+
+  set +e
+  TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    FRESHEYES_CLAUDE_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_FAKE_CLAUDE_VERSION="2.1.169" \
+    FRESHEYES_FAKE_CLAUDE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  set -e
+
+  [[ "$status" -ne 0 ]] || fail "Fable 5 accepted unsupported Claude Code 2.1.169"
+  assert_contains "$(cat "$stderr_file")" "Claude Fable 5 requires Claude Code 2.1.170 or newer" "old Claude Code failure"
+}
+
+test_claude_specific_model_override_wins() {
+  local run_tmp stdout_file
+  run_tmp="$(mktemp -d "$TEST_TMP/claude-override.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  rm -f "$ARGV_FILE"
+
+  TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    FRESHEYES_CLAUDE_MODEL="opus" \
+    FRESHEYES_MODEL="legacy-model-must-not-win" \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file"
+
+  "$PYTHON" - "$ARGV_FILE" <<'PY'
+import json
+import sys
+
+argv = json.load(open(sys.argv[1], encoding="utf-8"))
+model_index = argv.index("--model")
+if argv[model_index + 1] != "opus":
+    raise SystemExit(f"Claude-specific model override did not win: {argv!r}")
+PY
+}
+
 make_fake_claude
 test_manual_claude_invocation_uses_streaming_flags
 test_automatic_claude_extracts_structured_output
@@ -442,5 +522,7 @@ test_compound_launch_parent_pid_recovers_review
 test_manual_detaches_by_default_and_completes
 test_manual_foreground_runs_synchronously
 test_automatic_mode_does_not_detach
+test_fable_rejects_old_claude_code
+test_claude_specific_model_override_wins
 
 printf 'fresheyes-claude-provider tests passed\n'

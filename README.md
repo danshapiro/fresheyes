@@ -27,10 +27,12 @@ And, Fresh Eyes needs either Claude Code or Codex CLI to work its magic.
 
 ```bash
 npm install -g @openai/codex@latest
-npm install -g @anthropic-ai/claude-code
+npm install -g @anthropic-ai/claude-code@latest
 ```
 
 GPT-5.6 requires Codex CLI 0.144.0 or newer. Manual GPT reviews use GPT-5.6 Sol with Extra High reasoning by default; automatic reviews use Sol with Medium reasoning. Sol requires a Plus or higher Codex plan. On Free or Go, add `export FRESHEYES_GPT_MODEL=gpt-5.6-terra` to your shell profile so both manual and automatic reviews use the GPT-5.6 model available on those plans.
+
+Claude Fable 5 requires Claude Code 2.1.170 or newer. Manual Claude reviews use Fable 5 with Extra High reasoning by default; automatic reviews use Fable 5 with Medium reasoning. Fable 5 is available to Pro, Max, Team, and Enterprise users, as well as through usage credits and API access.
 
 Note that Claude reviews count against your Claude overage, not your subscription _(shakes fist at universe)_.
 
