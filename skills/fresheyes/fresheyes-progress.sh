@@ -11,6 +11,8 @@
 
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GPT_RESULT_PARSER="$SCRIPT_DIR/fresheyes-gpt-result.py"
 ALLOW_LEGACY_PROGRESS="${FRESHEYES_ALLOW_LEGACY_PROGRESS:-0}"
 OUTPUT_MODE="legacy"
 PID=""
@@ -270,26 +272,16 @@ detect_manual_verdict() {
     return 1
   fi
 
-  python3 - "$base" <<'PY' 2>/dev/null
-import re
-import sys
-from pathlib import Path
+  python3 "$GPT_RESULT_PARSER" --verdict "$base" 2>/dev/null
+}
 
-path = Path(sys.argv[1])
-try:
-    text = path.read_text(encoding="utf-8", errors="replace")
-except OSError:
-    sys.exit(1)
-
-verdict = ""
-for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
-    verdict = match.group(1).lower()
-
-if not verdict:
-    sys.exit(1)
-
-print(verdict)
-PY
+print_final_review_if_nonempty() {
+  local base="$1"
+  if [[ -s "$base" ]]; then
+    python3 "$GPT_RESULT_PARSER" --result "$base"
+    return $?
+  fi
+  return 1
 }
 
 status_file_field() {
@@ -582,7 +574,7 @@ print_result_or_pending() {
 
   case "$state" in
     complete)
-      if cat_if_nonempty "$base"; then
+      if print_final_review_if_nonempty "$base"; then
         return 0
       fi
       print_failure_diagnostic "$base"
@@ -675,7 +667,7 @@ if [[ "$OUTPUT_MODE" == "result" ]]; then
 fi
 
 if [[ "$REVIEW_STATE" == "complete" ]]; then
-  if cat_if_nonempty "$LOG_FILE"; then
+  if print_final_review_if_nonempty "$LOG_FILE"; then
     exit 0
   fi
   print_failure_diagnostic "$LOG_FILE"

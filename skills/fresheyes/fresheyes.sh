@@ -106,7 +106,7 @@ if [[ "$PROVIDER" == "gpt" ]]; then
       echo "Update it with: npm install -g @openai/codex@latest" >&2
       exit 1
     fi
-    if [[ "$CODEX_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+    if [[ "$CODEX_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
       CODEX_VERSION="${BASH_REMATCH[1]}"
     else
       echo "Error: unable to parse the Codex CLI version from: $CODEX_VERSION_OUTPUT" >&2
@@ -116,9 +116,12 @@ if [[ "$PROVIDER" == "gpt" ]]; then
     if ! python3 - "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION" <<'PY'
 import sys
 
-current = tuple(int(part) for part in sys.argv[1].split("."))
-minimum = tuple(int(part) for part in sys.argv[2].split("."))
-raise SystemExit(0 if current >= minimum else 1)
+current_text, minimum_text = sys.argv[1:3]
+current_core_text, separator, _ = current_text.partition("-")
+current = tuple(int(part) for part in current_core_text.split("."))
+minimum = tuple(int(part) for part in minimum_text.split("."))
+supported = current > minimum or (current == minimum and not separator)
+raise SystemExit(0 if supported else 1)
 PY
     then
       echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
@@ -147,6 +150,7 @@ fi
 
 # --- Resolve mode-specific files ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GPT_RESULT_PARSER="$SCRIPT_DIR/fresheyes-gpt-result.py"
 PROMPT_FILE=""
 SCHEMA_FILE=""
 REASONING_EFFORT=""
@@ -243,27 +247,7 @@ manual_verdict_from_log() {
   if [[ ! -f "$LOG_FILE" ]]; then
     return 1
   fi
-
-  python3 - "$LOG_FILE" <<'PY' 2>/dev/null
-import re
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-try:
-    text = path.read_text(encoding="utf-8", errors="replace")
-except OSError:
-    sys.exit(1)
-
-verdict = ""
-for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
-    verdict = match.group(1).lower()
-
-if not verdict:
-    sys.exit(1)
-
-print(verdict)
-PY
+  python3 "$GPT_RESULT_PARSER" --verdict "$LOG_FILE" 2>/dev/null
 }
 
 write_status() {
@@ -377,26 +361,7 @@ run_gpt_manual() {
     exit 1
   fi
   # Extract just the final review section (last occurrence of "## Files Examined" to end)
-  python3 - "$LOG_FILE" <<'PY'
-import shutil
-import sys
-from pathlib import Path
-
-path = Path(sys.argv[1])
-start = 0
-with path.open("rb") as handle:
-    while True:
-        offset = handle.tell()
-        line = handle.readline()
-        if not line:
-            break
-        if line.rstrip(b" \t\r\n") == b"## Files Examined":
-            start = offset
-
-with path.open("rb") as handle:
-    handle.seek(start)
-    shutil.copyfileobj(handle, sys.stdout.buffer)
-PY
+  python3 "$GPT_RESULT_PARSER" --result "$LOG_FILE"
 }
 
 run_gpt_automatic() {

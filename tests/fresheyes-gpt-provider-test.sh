@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 RUNNER="$ROOT_DIR/skills/fresheyes/fresheyes.sh"
+PROGRESS_SCRIPT="$ROOT_DIR/skills/fresheyes/fresheyes-progress.sh"
 
 TEST_TMP="$(mktemp -d)"
 FAKE_BIN="$TEST_TMP/bin"
@@ -39,9 +40,12 @@ if "-o" in sys.argv:
 else:
     for index in range(10_000):
         print(f"fake Codex diagnostic line {index}")
+    if os.environ.get("FRESHEYES_FAKE_OMIT_VERDICT") == "1":
+        print("INDEPENDENT CODE REVIEW PASSED")
     print("## Files Examined   ")
     print("- README.md")
-    print("INDEPENDENT CODE REVIEW PASSED")
+    if os.environ.get("FRESHEYES_FAKE_OMIT_VERDICT") != "1":
+        print("INDEPENDENT CODE REVIEW PASSED")
 PY
 chmod +x "$FAKE_BIN/codex"
 
@@ -86,31 +90,40 @@ if grep -q '^fake Codex diagnostic line' "$STDOUT_FILE"; then
   exit 1
 fi
 
-OLD_STDOUT_FILE="$TEST_TMP/old-version-stdout.txt"
-OLD_STDERR_FILE="$TEST_TMP/old-version-stderr.txt"
-set +e
-PATH="$FAKE_BIN:$PATH" \
-  FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
-  FRESHEYES_FAKE_VERSION="0.143.9" \
-  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
-  FRESHEYES_LOG_DIR="$TEST_TMP/old-version-logs" \
-  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/old-version-global-logs" \
-  FRESHEYES_GPT_MODEL= \
-  FRESHEYES_MODEL= \
-  FRESHEYES_MODE=manual \
-  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$OLD_STDOUT_FILE" 2> "$OLD_STDERR_FILE"
-old_version_status=$?
-set -e
+assert_unsupported_version() {
+  local version="$1"
+  local slug="${version//[^0-9A-Za-z]/-}"
+  local stdout_file="$TEST_TMP/unsupported-$slug-stdout.txt"
+  local stderr_file="$TEST_TMP/unsupported-$slug-stderr.txt"
+  local status
 
-if [[ "$old_version_status" -eq 0 ]]; then
-  printf 'GPT-5.6 review accepted unsupported Codex CLI 0.143.9\n' >&2
-  exit 1
-fi
-if ! grep -q 'GPT-5.6 requires Codex CLI 0.144.0 or newer' "$OLD_STDERR_FILE"; then
-  printf 'old Codex CLI failure did not explain the minimum version:\n' >&2
-  cat "$OLD_STDERR_FILE" >&2
-  exit 1
-fi
+  set +e
+  PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    FRESHEYES_FAKE_VERSION="$version" \
+    FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+    FRESHEYES_LOG_DIR="$TEST_TMP/unsupported-$slug-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/unsupported-$slug-global-logs" \
+    FRESHEYES_GPT_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_MODE=manual \
+    timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  set -e
+
+  if [[ "$status" -eq 0 ]]; then
+    printf 'GPT-5.6 review accepted unsupported Codex CLI %s\n' "$version" >&2
+    exit 1
+  fi
+  if ! grep -q 'GPT-5.6 requires Codex CLI 0.144.0 or newer' "$stderr_file"; then
+    printf 'unsupported Codex CLI failure did not explain the minimum version:\n' >&2
+    cat "$stderr_file" >&2
+    exit 1
+  fi
+}
+
+assert_unsupported_version "0.143.9"
+assert_unsupported_version "0.144.0-alpha.1"
 
 TERRA_ARGV_FILE="$TEST_TMP/codex-terra-argv.json"
 TERRA_STDOUT_FILE="$TEST_TMP/terra-stdout.txt"
@@ -171,5 +184,86 @@ if ! grep -q '^Fresh Eyes: approved\.$' "$AUTOMATIC_STDOUT_FILE"; then
   cat "$AUTOMATIC_STDOUT_FILE" >&2
   exit 1
 fi
+
+DETACHED_ARGV_FILE="$TEST_TMP/codex-detached-argv.json"
+DETACHED_LOG_DIR="$TEST_TMP/detached-logs"
+DETACHED_GLOBAL_LOG_DIR="$TEST_TMP/detached-global-logs"
+detached_launch=$(
+  PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$DETACHED_ARGV_FILE" \
+    FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+    FRESHEYES_LOG_DIR="$DETACHED_LOG_DIR" \
+    FRESHEYES_GLOBAL_LOG_DIR="$DETACHED_GLOBAL_LOG_DIR" \
+    FRESHEYES_GPT_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_MODE=manual \
+    timeout 30s bash "$RUNNER" --gpt --manual "Review README.md."
+)
+detached_pid=$(sed -n 's/^FRESHPID=//p' <<< "$detached_launch" | tr -d '[:space:]')
+if [[ ! "$detached_pid" =~ ^[0-9]+$ ]]; then
+  printf 'detached GPT review did not return a numeric PID: %s\n' "$detached_launch" >&2
+  exit 1
+fi
+
+detached_complete=0
+for _ in {1..100}; do
+  detached_status=$(
+    FRESHEYES_LOG_DIR="$DETACHED_LOG_DIR" \
+      FRESHEYES_GLOBAL_LOG_DIR="$DETACHED_GLOBAL_LOG_DIR" \
+      bash "$PROGRESS_SCRIPT" --json "$detached_pid"
+  )
+  if [[ "$detached_status" == *'"runner_state":"complete"'* ]]; then
+    detached_complete=1
+    break
+  fi
+  if [[ "$detached_status" == *'"runner_state":"failed"'* ]]; then
+    printf 'detached GPT review failed: %s\n' "$detached_status" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
+if [[ "$detached_complete" != "1" ]]; then
+  printf 'detached GPT review did not complete: %s\n' "$detached_status" >&2
+  exit 1
+fi
+
+detached_result=$(
+  FRESHEYES_LOG_DIR="$DETACHED_LOG_DIR" \
+    FRESHEYES_GLOBAL_LOG_DIR="$DETACHED_GLOBAL_LOG_DIR" \
+    bash "$PROGRESS_SCRIPT" --result "$detached_pid"
+)
+if [[ "$detached_result" == *"fake Codex diagnostic line"* ]]; then
+  printf 'detached GPT result returned the raw diagnostic transcript\n' >&2
+  exit 1
+fi
+if [[ "$detached_result" != *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
+  printf 'detached GPT result omitted the final verdict:\n%s\n' "$detached_result" >&2
+  exit 1
+fi
+
+NO_VERDICT_ARGV_FILE="$TEST_TMP/codex-no-verdict-argv.json"
+NO_VERDICT_LOG_DIR="$TEST_TMP/no-verdict-logs"
+PATH="$FAKE_BIN:$PATH" \
+  FRESHEYES_FAKE_ARGV="$NO_VERDICT_ARGV_FILE" \
+  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+  FRESHEYES_FAKE_OMIT_VERDICT=1 \
+  FRESHEYES_LOG_DIR="$NO_VERDICT_LOG_DIR" \
+  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/no-verdict-global-logs" \
+  FRESHEYES_GPT_MODEL= \
+  FRESHEYES_MODEL= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$TEST_TMP/no-verdict-stdout.txt"
+no_verdict_status_file=$(ls -t "$NO_VERDICT_LOG_DIR"/*.status.json | head -n 1)
+python3 - "$no_verdict_status_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    status = json.load(handle)
+if status.get("state") != "complete":
+    raise SystemExit(f"no-verdict GPT run did not complete: {status!r}")
+if "verdict" in status:
+    raise SystemExit(f"incidental transcript verdict leaked into runner status: {status!r}")
+PY
 
 printf 'fresheyes-gpt-provider tests passed\n'

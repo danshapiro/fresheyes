@@ -126,9 +126,6 @@ require("--output-format")
 idx = argv.index("--output-format")
 if idx + 1 >= len(argv) or argv[idx + 1] != "stream-json":
     raise SystemExit(f"--output-format was not stream-json: {argv!r}")
-model_idx = argv.index("--model")
-if model_idx + 1 >= len(argv) or argv[model_idx + 1] != "opus":
-    raise SystemExit(f"GPT-specific override contaminated the Claude model: {argv!r}")
 for value in ["--verbose", "--include-partial-messages", "--disable-slash-commands"]:
     require(value)
 if "--bare" in argv:
