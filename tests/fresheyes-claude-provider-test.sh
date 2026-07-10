@@ -133,6 +133,9 @@ for value in ["--verbose", "--include-partial-messages", "--disable-slash-comman
     require(value)
 if "--bare" in argv:
     raise SystemExit(f"unexpected --bare: {argv!r}")
+model_idx = argv.index("--model")
+if model_idx + 1 >= len(argv) or argv[model_idx + 1] != "opus":
+    raise SystemExit(f"Claude-specific override did not win: {argv!r}")
 if "--" not in argv:
     raise SystemExit(f"missing -- prompt separator: {argv!r}")
 if argv[-1].startswith("--") or "Review README.md." not in argv[-1]:
@@ -190,6 +193,8 @@ run_runner_capture() {
     FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     FRESHEYES_GPT_MODEL="gpt-5.6-terra" \
+    FRESHEYES_CLAUDE_MODEL="opus" \
+    FRESHEYES_MODEL="legacy-model-must-not-win" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
     timeout 30s bash "$RUNNER" "$@" > "$stdout_file"; then

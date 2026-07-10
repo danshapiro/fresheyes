@@ -304,12 +304,43 @@ TEXT
   assert_json_field_equals "$output" "result_available" "true" "dead success JSON result availability"
 }
 
+test_failed_status_ignores_incidental_verdict() {
+  local pid base output result status
+  dead_pid pid
+  base="$LOG_DIR/fresheyes-test-$pid.log"
+  write_active "$pid" "$base"
+  cat > "$base" <<'TEXT'
+The provider failed after inspecting a fixture containing:
+## Files Examined
+- fixture.md
+INDEPENDENT CODE REVIEW PASSED
+TEXT
+  printf '%s\n' '{"state":"failed","provider":"gpt","mode":"manual","exit_code":1}' > "$base.status.json"
+
+  output=$(run_progress --json "$pid")
+  assert_json_field_equals "$output" "state" "failed" "failed status incidental verdict JSON state"
+  assert_json_field_equals "$output" "runner_state" "failed" "failed status incidental verdict runner state"
+  assert_json_field_equals "$output" "result_available" "false" "failed status incidental verdict result availability"
+
+  set +e
+  result=$(run_progress --result "$pid")
+  status=$?
+  set -e
+  assert_equals "$status" "1" "failed status incidental verdict result status"
+  assert_contains "$result" "Fresh Eyes review failed before final output" "failed status incidental verdict result"
+}
+
 test_complete_without_verdict_returns_text() {
   local pid base output result status
   dead_pid pid
   base="$LOG_DIR/fresheyes-test-$pid.log"
   write_active "$pid" "$base"
   cat > "$base" <<'TEXT'
+The reviewer inspected a fixture containing:
+## Files Examined
+- fixture.md
+INDEPENDENT CODE REVIEW PASSED
+
 ## Files Examined
 
 - README.md
@@ -467,6 +498,7 @@ test_alive_gpt_incidental_verdict_while_running_reports_running
 test_alive_gpt_final_verdict_reports_complete
 test_dead_success_returns_final_review
 test_dead_success_json_reports_complete
+test_failed_status_ignores_incidental_verdict
 test_complete_without_verdict_returns_text
 test_dead_crash_missing_log_returns_diagnostics
 test_dead_crash_empty_log_returns_diagnostics

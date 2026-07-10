@@ -31,11 +31,17 @@ if sys.argv[1:] == ["--version"]:
 with open(os.environ["FRESHEYES_FAKE_ARGV"], "w", encoding="utf-8") as handle:
     json.dump(sys.argv[1:], handle)
 
-for index in range(10_000):
-    print(f"fake Codex diagnostic line {index}")
-print("## Files Examined")
-print("- README.md")
-print("INDEPENDENT CODE REVIEW PASSED")
+if "-o" in sys.argv:
+    output_path = sys.argv[sys.argv.index("-o") + 1]
+    with open(output_path, "w", encoding="utf-8") as handle:
+        json.dump({"approve_commit": True, "issues": []}, handle)
+    print("fake automatic Codex review complete")
+else:
+    for index in range(10_000):
+        print(f"fake Codex diagnostic line {index}")
+    print("## Files Examined   ")
+    print("- README.md")
+    print("INDEPENDENT CODE REVIEW PASSED")
 PY
 chmod +x "$FAKE_BIN/codex"
 
@@ -73,6 +79,10 @@ PY
 if ! grep -q '^INDEPENDENT CODE REVIEW PASSED$' "$STDOUT_FILE"; then
   printf 'manual GPT review did not return a passing review:\n' >&2
   cat "$STDOUT_FILE" >&2
+  exit 1
+fi
+if grep -q '^fake Codex diagnostic line' "$STDOUT_FILE"; then
+  printf 'manual GPT review emitted the full diagnostic transcript instead of the final section\n' >&2
   exit 1
 fi
 
@@ -126,5 +136,40 @@ actual_model = argv[model_index + 1]
 if actual_model != "gpt-5.6-terra":
     raise SystemExit(f"expected GPT-specific model override to win, got {actual_model!r}")
 PY
+
+AUTOMATIC_ARGV_FILE="$TEST_TMP/codex-automatic-argv.json"
+AUTOMATIC_STDOUT_FILE="$TEST_TMP/automatic-stdout.txt"
+PATH="$FAKE_BIN:$PATH" \
+  FRESHEYES_FAKE_ARGV="$AUTOMATIC_ARGV_FILE" \
+  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+  FRESHEYES_LOG_DIR="$TEST_TMP/automatic-logs" \
+  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/automatic-global-logs" \
+  FRESHEYES_GPT_MODEL= \
+  FRESHEYES_MODEL= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --automatic "Review staged changes." > "$AUTOMATIC_STDOUT_FILE"
+
+python3 - "$AUTOMATIC_ARGV_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    argv = json.load(handle)
+
+model_index = argv.index("--model")
+actual_model = argv[model_index + 1]
+if actual_model != "gpt-5.6-sol":
+    raise SystemExit(f"expected automatic GPT model gpt-5.6-sol, got {actual_model!r}")
+if "model_reasoning_effort=medium" not in argv:
+    raise SystemExit(f"automatic GPT review did not use medium reasoning: {argv!r}")
+if "--output-schema" not in argv or "-o" not in argv:
+    raise SystemExit(f"automatic GPT review did not request structured output: {argv!r}")
+PY
+
+if ! grep -q '^Fresh Eyes: approved\.$' "$AUTOMATIC_STDOUT_FILE"; then
+  printf 'automatic GPT review did not approve the fake structured result:\n' >&2
+  cat "$AUTOMATIC_STDOUT_FILE" >&2
+  exit 1
+fi
 
 printf 'fresheyes-gpt-provider tests passed\n'

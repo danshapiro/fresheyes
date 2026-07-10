@@ -113,7 +113,14 @@ if [[ "$PROVIDER" == "gpt" ]]; then
       echo "Update it with: npm install -g @openai/codex@latest" >&2
       exit 1
     fi
-    if [[ "$(printf '%s\n' "$MINIMUM_CODEX_VERSION" "$CODEX_VERSION" | sort -V | head -n 1)" != "$MINIMUM_CODEX_VERSION" ]]; then
+    if ! python3 - "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION" <<'PY'
+import sys
+
+current = tuple(int(part) for part in sys.argv[1].split("."))
+minimum = tuple(int(part) for part in sys.argv[2].split("."))
+raise SystemExit(0 if current >= minimum else 1)
+PY
+    then
       echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
       echo "Update it with: npm install -g @openai/codex@latest" >&2
       exit 1
@@ -371,15 +378,24 @@ run_gpt_manual() {
   fi
   # Extract just the final review section (last occurrence of "## Files Examined" to end)
   python3 - "$LOG_FILE" <<'PY'
+import shutil
 import sys
 from pathlib import Path
 
-lines = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+path = Path(sys.argv[1])
 start = 0
-for index, line in enumerate(lines):
-    if line.rstrip("\r\n") == "## Files Examined":
-        start = index
-sys.stdout.write("".join(lines[start:]))
+with path.open("rb") as handle:
+    while True:
+        offset = handle.tell()
+        line = handle.readline()
+        if not line:
+            break
+        if line.rstrip(b" \t\r\n") == b"## Files Examined":
+            start = offset
+
+with path.open("rb") as handle:
+    handle.seek(start)
+    shutil.copyfileobj(handle, sys.stdout.buffer)
 PY
 }
 

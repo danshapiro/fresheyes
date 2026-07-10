@@ -636,22 +636,26 @@ if [[ -n "$OWNER_PID" && "$OWNER_PID" != "$PID" ]]; then
   OWNER_PID_STATE=$(_process_state "$OWNER_PID")
 fi
 
-VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
 STATUS_STATE=$(status_file_field "$LOG_FILE" "state" 2>/dev/null || true)
 STATUS_VERDICT=$(status_file_field "$LOG_FILE" "verdict" 2>/dev/null || true)
-if [[ "$STATUS_STATE" == "running" ]]; then
-  # Codex logs include inspected source and command output while the review is
-  # active. Those intermediate lines can contain verdict examples, so the
-  # runner's explicit state is authoritative until it finishes.
+if [[ -n "$STATUS_STATE" ]]; then
+  # Codex logs include inspected source and command output, which can contain
+  # verdict examples. A runner status file is authoritative whenever present;
+  # raw-log detection is only for legacy runs without structured status.
   VERDICT=""
-elif [[ -z "$VERDICT" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
-  VERDICT="$STATUS_VERDICT"
+  if [[ "$STATUS_STATE" == "complete" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
+    VERDICT="$STATUS_VERDICT"
+  fi
+else
+  VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
 fi
 
-if [[ -n "$VERDICT" || "$STATUS_STATE" == "complete" ]]; then
+if [[ "$STATUS_STATE" == "complete" ]]; then
   REVIEW_STATE="complete"
 elif [[ "$STATUS_STATE" == "failed" ]]; then
   REVIEW_STATE="failed"
+elif [[ -n "$VERDICT" ]]; then
+  REVIEW_STATE="complete"
 elif [[ -n "$PID" ]] && _review_is_running "$PID" "$LOG_FILE"; then
   REVIEW_STATE="running"
 elif [[ -n "$PID" ]]; then
