@@ -333,6 +333,7 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
   FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
     setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
   echo "FRESHPID=$HANDLE"
+  echo "NEXT: bash $SCRIPT_DIR/fresheyes-progress.sh --json $HANDLE   (reviews take 5-30 min; poll every 30-60s)"
   exit 0
 fi
 

@@ -142,6 +142,32 @@ test_plain_launch_trackers_and_completion() {
   [[ "$(json_field "$output" "verdict")" == "passed" ]] || fail "plain launch verdict"
 }
 
+# --- launch receipt: exactly two lines, self-instructing, no noise
+test_receipt_is_exactly_two_lines() {
+  local log_dir="$TEST_TMP/logs-receipt"
+  mkdir -p "$log_dir"
+  local stdout_file="$TEST_TMP/receipt-stdout.txt"
+  launch "$log_dir" "$RUNNER" --claude "review HEAD" > "$stdout_file"
+  local lines
+  lines=$(wc -l < "$stdout_file")
+  [[ "$lines" -eq 2 ]] || fail "receipt must be exactly 2 lines, got $lines:
+$(cat "$stdout_file")"
+  local handle
+  handle=$(parse_handle "$(cat "$stdout_file")")
+  local second
+  second=$(sed -n '2p' "$stdout_file")
+  assert_contains "$second" "NEXT: bash " "receipt line 2 prefix"
+  assert_contains "$second" "/fresheyes-progress.sh --json $handle" "receipt line 2 poll command"
+  assert_contains "$second" "reviews take 5-30 min; poll every 30-60s" "receipt line 2 cadence"
+  # Guardrails: no NOTE/warning line, no status-file path.
+  if grep -qi 'NOTE\|warning' "$stdout_file"; then
+    fail "receipt must not contain a NOTE/warning line"
+  fi
+  if grep -q 'status\.json' "$stdout_file"; then
+    fail "receipt must not print the status-file path"
+  fi
+}
+
 # --- (b) amplifier-style launch: monitor mode makes the backgrounded setsid
 # process a process-group leader, so util-linux setsid FORKS and $! diverges
 # from the child pid. The printed handle must resolve anyway (regression for
@@ -407,6 +433,7 @@ $after"
 
 make_fake_claude
 test_plain_launch_trackers_and_completion
+test_receipt_is_exactly_two_lines
 test_monitor_mode_launch_handle_still_resolves
 test_mint_handle_suffix_always_has_hex_letter
 test_heartbeat_advances

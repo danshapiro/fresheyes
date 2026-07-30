@@ -63,58 +63,57 @@ Run it as a plain foreground command:
 bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
 ```
 
-Manual reviews detach into their own session automatically, so this returns in under a second and prints a single line:
+Manual reviews detach automatically, so this returns within a couple of seconds and prints exactly two lines:
 
 ```
-FRESHPID=12345
+FRESHPID=20260729-181530-a3f9c2
+NEXT: bash <base-directory>/fresheyes-progress.sh --json 20260729-181530-a3f9c2   (reviews take 5-30 min; poll every 30-60s)
 ```
 
-Read the number after `FRESHPID=` (just the digits, e.g. `12345` — not the whole `FRESHPID=12345` line) and save it as `$FRESHPID`. It is your handle for the entire review lifecycle (polling in Step 5, result retrieval in Step 7). Because the review runs in its own session, a harness timeout on this call cannot kill it; all output goes to log files reachable through `fresheyes-progress.sh` (Claude provider progress is also tracked in structured sidecar logs). If the command prints no `FRESHPID=` line — for example an error that `setsid` is not installed — do not proceed to Step 5; report the command's output to the user.
+Read the value after `FRESHPID=` — an OPAQUE run handle (not a process id; do not pass it to `ps` or `kill`). Save it; it is your handle for the entire review lifecycle (polling in Step 5, result retrieval in Step 7). The `NEXT:` line is the exact poll command to run. If no `FRESHPID=` line is printed, do not proceed to Step 5 — report the command's output to the user.
 
-Do not add `setsid`, a trailing `&`, output redirects, or `$!` — the script backgrounds itself. Run the command exactly as above and read `FRESHPID` from its output. (Adding `--foreground` would stream the review synchronously instead; you never want that here, because this call would then block and risk being killed by a harness timeout.)
+Do not add `setsid`, a trailing `&`, output redirects, or `$!` — the script backgrounds itself. Run the command exactly as above and read the receipt from its output. Do not add `--foreground` preemptively: it blocks for the full review (5-30 minutes). Use it only when a poll tells you to (see the state table below) — and when you do, first make sure your harness/exec timeout for that call is longer than the review (request/configure a timeout of at least 30 minutes).
 
-### Step 5: Poll every 2 minutes
+### Step 5: Poll every 30-60 seconds
 
-Every 120 seconds, poll the progress script in JSON mode:
+Poll with the exact command from the receipt's `NEXT:` line:
 
 ```bash
-bash "<base-directory>/fresheyes-progress.sh" --json "$FRESHPID"
+bash "<base-directory>/fresheyes-progress.sh" --json <handle>
 ```
 
-Do not call `fresheyes-progress.sh "$FRESHPID"` without `--json` or `--result`; bare PID polling is intentionally rejected because stale legacy progress can look like current output.
+Do not call `fresheyes-progress.sh <handle>` without `--json` or `--result`; bare handle polling is intentionally rejected because stale legacy progress can look like current output.
 
-The output is a single JSON object. Important fields include:
+Each poll returns one JSON line. The `state` field and the command's exit code tell you everything:
 
-- `state`: `running`, `complete`, `failed`, or `missing`.
-- `verdict`: `passed` or `failed` when a manual review has reached its final marker.
-- `pid_state`: `active`, `zombie`, `missing`, or `unknown`.
-- `owner_pid_state`: same values when the tracked PID was only a launcher and the real review PID is known.
-- `line_count`: current final-review log line count.
-- `last_log_mtime_epoch`: final-review log mtime.
-- `provider_events` and `last_provider_event`: Claude-provider stream progress when available.
-- `log_path`: the tracked review log.
-- `result_available`: convenience boolean. `true` only when a final verdict marker **and** a non-empty log are both present. It is **not** a tool success/failure signal — a `false` value does not mean the review failed or that no text exists (a finished review can have retrievable text with `result_available=false`). Do not branch on this field; always retrieve the review with `--result` (Step 7).
+| state | exit | meaning | what you do |
+|---|---|---|---|
+| `launching` | 0 | the review child is starting; no heartbeat yet | poll again in ~15s |
+| `running` | 0 | fresh heartbeat; review in progress | keep polling every 30-60s |
+| `complete` | 0 | verdict present (`verdict`: `passed`/`failed`) | fetch the review with `--result` (Step 7) |
+| `killed_at_launch` | 3 | the child never wrote its first heartbeat | do what the `message` says: re-run the SAME command with `--foreground`, with a harness/exec timeout longer than the review (5-30 min) |
+| `died` | 4 | heartbeat went stale and the review process is gone, no verdict | inspect the log at the path in `message` first (evidence); optionally re-run with `--foreground` |
+| `unknown_handle` | 5 | no tracker for this handle | the handle is wrong, or its trackers were removed (e.g. /tmp cleanup); re-check the receipt, else relaunch |
 
-Examples:
+`launching` and `running` are healthy states — never treat them as failures, and never abort a poll loop on them. The three failure states carry a `message` field with the observation, likely cause, and the exact remediation; relay it and follow it.
 
-```json
-{"state":"running","pid":12345,"pid_state":"active","line_count":5270,"last_log_mtime_epoch":1780376868}
-```
+Poll exit-tolerantly: the failure states return NONZERO exit codes (3/4/5), so a `set -e`-style loop would abort on the very poll that carries the diagnosis. Capture the output and branch on the JSON `state` field (or the captured exit code):
 
-```json
-{"state":"complete","verdict":"passed","pid":12345,"pid_state":"active","line_count":4315,"result_available":true}
-```
+    output=$(bash <base-directory>/fresheyes-progress.sh --json <handle> || true)
 
-The progress script checks final review markers before process state. A review with `state=complete` is complete even if `pid_state` is still `active`.
+then read `state` from the captured JSON. Never let a nonzero poll exit kill your loop before you have read the `message`.
 
 ### Step 6: Interpret and act
 
-- **`state=complete` + `verdict=passed`** → the review passed. Proceed to Step 7.
-- **`state=complete` + `verdict=failed`** → the review completed and found blocking issues. Proceed to Step 7.
-- **`state=complete` with no `verdict`** → the review finished but emitted no PASSED/FAILED marker (`result_available` is `false`). This is **not** a tool failure. Run Step 7 (`--result`): it returns the review text when the log has content, or a failure diagnostic when it does not. Report exactly what `--result` returns.
-- **`state=running`** → continue polling.
-- **`state=failed`** → report the diagnostic evidence from the JSON and, if useful, Step 7's result command.
-- **`state=missing`** → report that no tracked review output was available, including the PID and `pid_state` from the JSON.
+The state table in Step 5 is authoritative. Acting on each of the six states:
+
+- **`launching` or `running`** → healthy; keep polling on the Step 5 cadence.
+- **`complete` + `verdict=passed`** → the review passed. Proceed to Step 7.
+- **`complete` + `verdict=failed`** → the review completed and found blocking issues. Proceed to Step 7.
+- **`complete` with no `verdict`** → the review finished but emitted no PASSED/FAILED marker. This is **not** a tool failure. Run Step 7 (`--result`): it returns the review text when the log has content, or a failure diagnostic when it does not. Report exactly what `--result` returns.
+- **`killed_at_launch`** → do what the `message` says: re-run the SAME launch command with `--foreground`, after making sure your harness/exec timeout for that call is longer than the review (5-30 min; request/configure at least 30 minutes).
+- **`died`** → relay the `message` — it leads with the log path as evidence. Optionally re-run with `--foreground` (same timeout requirement as above).
+- **`unknown_handle`** → re-check the handle against the receipt's `FRESHPID=` line; if the handle is right, its trackers were removed (e.g. /tmp cleanup) — relaunch from Step 4.
 
 Do not kill a Fresh Eyes process. If it appears stuck, escalate to the user with evidence instead of stopping it. Evidence should include at least two consecutive `--json` snapshots showing unchanged `line_count`, unchanged `last_log_mtime_epoch`, unchanged `provider_events` when present, and the relevant `pid_state` / `owner_pid_state` values.
 
@@ -125,14 +124,14 @@ Never infer failure from terminal truncation, repeated code excerpts, or a live 
 When `state=complete`, fetch the final review text:
 
 ```bash
-bash "<base-directory>/fresheyes-progress.sh" --result "$FRESHPID"
+bash "<base-directory>/fresheyes-progress.sh" --result <handle>
 ```
 
-Output the review response exactly as returned. Do not report a running review as failed unless `--json` returns `state=failed`.
+Output the review response exactly as returned. Do not report a running review as failed unless `--json` reports one of the failure states (`killed_at_launch`, `died`, `unknown_handle`).
 
 ## Parallel reviews
 
-Multiple fresheyes reviews can run simultaneously. Each invocation gets its own PID and its own `.active.$PID` file — they never collide. To run two reviews in parallel, save each `FRESHPID` under a distinct variable and poll them separately.
+Multiple fresheyes reviews can run simultaneously. Each invocation mints its own opaque handle and its own tracker files — they never collide. To run two reviews in parallel, save each receipt's handle under a distinct variable and poll them separately.
 
 ## Common Mistakes
 
@@ -140,7 +139,7 @@ Multiple fresheyes reviews can run simultaneously. Each invocation gets its own 
 - **Biasing the reviewer on your own initiative** — If the user just said "review src/auth/ with fresh eyes", don't editorialize the scope into "review src/auth/ for security issues." But if the user *asked* for a security review, pass that through faithfully.
 - **Vague scope** — "Check our recent work" means nothing to a reviewer with no conversation context. Be specific: which commits, files, or diffs.
 - **Including provider in scope** — "Review using claude the staged changes" passes "using claude" as scope text. Provider goes as a flag (`--claude`), not in the scope string.
-- **Not polling** — The review takes 5-30 minutes. You must poll every 2 minutes until it completes.
+- **Not polling** — The review takes 5-30 minutes. You must poll every 30-60 seconds until it reaches a terminal state.
 - **Doing it yourself** — either use the process here, or notify the user. Do not try a different approach.
 - **Killing apparent stuck reviews** — do not stop the process. Escalate with two or more `--json` snapshots that show why it appears stuck.
 - **Opening the log** — Do not read, cat, tail, or grep the log file. Interact only through fresheyes-progress.sh.
