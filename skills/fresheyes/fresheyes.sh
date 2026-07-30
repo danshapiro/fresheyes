@@ -204,6 +204,111 @@ if [[ "$MODE" == "automatic" && ! -f "$SCHEMA_FILE" ]]; then
   exit 1
 fi
 
+GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
+LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
+mkdir -p "$LOG_DIR"
+
+# Opaque run handle: parent-minted, never a pid. The 6-hex suffix must
+# contain at least one [a-f]: all-digit suffixes (probability (10/16)^6
+# ≈ 6%) match the retained legacy filename-pid regex `-([0-9]+)\.log$`,
+# and with leading zeros stripped a suffix like 000002 resolves to an
+# always-live low pid — permanently masking killed_at_launch/died during
+# the ownerless launching window (proven by repro).
+mint_handle() {
+  local suffix
+  while :; do
+    suffix="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$suffix" =~ [a-f] ]] && break
+  done
+  printf '%s-%s\n' "$(date +%Y%m%d-%H%M%S)" "$suffix"
+}
+
+if [[ -n "${FRESHEYES_HANDLE:-}" && -n "${FRESHEYES_LOG_FILE:-}" ]]; then
+  # Detached child: identity was minted by the parent and arrives via env.
+  HANDLE="$FRESHEYES_HANDLE"
+  LOG_FILE="$FRESHEYES_LOG_FILE"
+else
+  # Foreground / automatic / direct runs mint locally.
+  HANDLE="$(mint_handle)"
+  LOG_FILE="$LOG_DIR/fresheyes-$HANDLE.log"
+fi
+RESULT_FILE="$LOG_FILE.result.md"
+EVENT_LOG="$LOG_FILE.events.jsonl"
+STREAM_LOG="$LOG_FILE.stream.jsonl"
+STDERR_LOG="$LOG_FILE.stderr"
+STATUS_FILE="$LOG_FILE.status.json"
+LAUNCH_STDERR="$LOG_FILE.launch.stderr"
+# The detached child must record the parent's ACTUAL detach method:
+# write_status overwrites detach_method on every write, so a child that
+# hardcoded "setsid" would clobber a systemd-run launch's method on its
+# first "running" write. The parent forwards FRESHEYES_DETACH_METHOD in
+# both launch paths (Task 3 setsid prefix; Task 8 --setenv).
+DETACH_METHOD="${FRESHEYES_DETACH_METHOD:-setsid}"
+LAUNCHED_AT_EPOCH="$(date +%s)"
+OWNER_PID=""
+
+write_tracker_alias() {
+  local dir="$1"
+  local name="$2"
+
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s\n' "$LOG_FILE" > "$dir/$name" 2>/dev/null || true
+}
+
+# Atomic status.json writer. Read-modify-write so parent-written fields
+# (launched_at) survive child updates. Call shape unchanged:
+#   write_status <state> <exit_code> <verdict>
+write_status() {
+  local state="$1"
+  local exit_code="${2:-}"
+  local verdict="${3:-}"
+  python3 - "$STATUS_FILE" "$state" "$PROVIDER" "$MODE" "$LOG_FILE" \
+    "$exit_code" "$verdict" "${OWNER_PID:-}" "${LAUNCHED_AT_EPOCH:-}" \
+    "${DETACH_METHOD:-}" <<'PY' || true
+import json, os, sys, time
+
+(path, state, provider, mode, log_path,
+ exit_code, verdict, owner_pid, launched_at, detach_method) = sys.argv[1:11]
+
+record = {}
+if os.path.exists(path):
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            record = json.load(handle)
+    except Exception:
+        record = {}
+
+record["severity"] = "error" if state == "failed" else "info"
+record["state"] = state
+record["provider"] = provider
+record["mode"] = mode
+record["log_path"] = log_path
+record["updated_at_epoch"] = time.time()
+if state != "launching":
+    record["heartbeat_at"] = time.time()
+if exit_code:
+    record["exit_code"] = int(exit_code)
+if verdict:
+    record["verdict"] = verdict
+if owner_pid:
+    record["owner_pid"] = int(owner_pid)
+    record["pid"] = int(owner_pid)  # legacy readers
+if launched_at:
+    record.setdefault("launched_at", float(launched_at))
+if detach_method:
+    record["detach_method"] = detach_method
+
+tmp_path = f"{path}.tmp.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    # Keep the current writer's exact serialization (compact separators +
+    # sorted keys + trailing newline): the provider tests assert compact
+    # substrings like '"state":"complete"' against this file.
+    json.dump(record, handle, separators=(",", ":"), sort_keys=True)
+    handle.write("\n")
+os.replace(tmp_path, path)
+PY
+}
+
 # --- Detach manual reviews into their own session (default) ---
 # Manual reviews are long (5-30 min). By default we re-exec under setsid so the
 # review survives the caller's process group — e.g. an agent harness timeout on
@@ -217,8 +322,17 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
     echo "Error: cannot detach the review: setsid (util-linux) not found. Re-run with --foreground to run synchronously." >&2
     exit 2
   fi
-  FRESHEYES_DAEMONIZED=1 setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>&1 &
-  echo "FRESHPID=$!"
+  # Parent-owned identity: locator + initial status exist BEFORE the child
+  # runs, so a child killed at launch still leaves a loud, diagnosable trail.
+  write_tracker_alias "$LOG_DIR" ".locator.$HANDLE"
+  if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
+    write_tracker_alias "$GLOBAL_LOG_DIR" ".locator.$HANDLE"
+  fi
+  write_status "launching" "" ""
+  FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
+  FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
+    setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
+  echo "FRESHPID=$HANDLE"
   exit 0
 fi
 
@@ -229,17 +343,6 @@ template = open(sys.argv[1]).read()
 print(template.replace('{{REVIEW_SCOPE}}', sys.argv[2]))
 " "$PROMPT_FILE" "$SCOPE_TEXT")
 
-# --- Log file setup ---
-GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
-LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
-mkdir -p "$LOG_DIR"
-LOG_FILE="$LOG_DIR/fresheyes-$(date +%Y%m%d-%H%M%S)-$$.log"
-RESULT_FILE="$LOG_FILE.result.md"
-EVENT_LOG="$LOG_FILE.events.jsonl"
-STREAM_LOG="$LOG_FILE.stream.jsonl"
-STDERR_LOG="$LOG_FILE.stderr"
-STATUS_FILE="$LOG_FILE.status.json"
-
 if [[ "$PROVIDER" == "claude" ]]; then
   : > "$LOG_FILE"
   : > "$EVENT_LOG"
@@ -247,21 +350,12 @@ if [[ "$PROVIDER" == "claude" ]]; then
   : > "$STDERR_LOG"
 fi
 
-echo "$LOG_FILE" > "$LOG_DIR/.active.$$"
+OWNER_PID=$$
+echo "$LOG_FILE" > "$LOG_DIR/.active.$HANDLE"
 
-write_tracker_alias() {
-  local dir="$1"
-  local name="$2"
-
-  mkdir -p "$dir" 2>/dev/null || return 0
-  printf '%s\n' "$LOG_FILE" > "$dir/$name" 2>/dev/null || true
-}
-
-write_tracker_alias "$LOG_DIR" ".locator.$$"
-write_tracker_alias "$LOG_DIR" ".parent.$PPID"
+write_tracker_alias "$LOG_DIR" ".locator.$HANDLE"
 if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
-  write_tracker_alias "$GLOBAL_LOG_DIR" ".locator.$$"
-  write_tracker_alias "$GLOBAL_LOG_DIR" ".parent.$PPID"
+  write_tracker_alias "$GLOBAL_LOG_DIR" ".locator.$HANDLE"
 fi
 
 HEARTBEAT_PID=""
@@ -295,40 +389,6 @@ print(verdict)
 PY
 }
 
-write_status() {
-  local state="$1"
-  local exit_code="${2:-}"
-  local verdict="${3:-}"
-
-  python3 - "$STATUS_FILE" "$state" "$exit_code" "$verdict" "$PROVIDER" "$MODE" "$$" "$LOG_FILE" <<'PY'
-import json
-import os
-import sys
-import time
-
-path, state, exit_code, verdict, provider, mode, pid, log_path = sys.argv[1:9]
-record = {
-    "severity": "error" if state == "failed" else "info",
-    "state": state,
-    "provider": provider,
-    "mode": mode,
-    "pid": int(pid),
-    "log_path": log_path,
-    "updated_at_epoch": time.time(),
-}
-if exit_code:
-    record["exit_code"] = int(exit_code)
-if verdict:
-    record["verdict"] = verdict
-
-tmp_path = f"{path}.tmp.{os.getpid()}"
-with open(tmp_path, "w", encoding="utf-8") as handle:
-    json.dump(record, handle, separators=(",", ":"), sort_keys=True)
-    handle.write("\n")
-os.replace(tmp_path, path)
-PY
-}
-
 _cleanup() {
   local status=$?
   if [[ "${FINAL_STATUS_WRITTEN:-0}" != "1" ]]; then
@@ -338,7 +398,7 @@ _cleanup() {
       write_status "failed" "$status" "" || true
     fi
   fi
-  rm -f "$LOG_DIR/.active.$$"
+  rm -f "$LOG_DIR/.active.$HANDLE"
   if [[ -n "${HEARTBEAT_PID:-}" ]]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true

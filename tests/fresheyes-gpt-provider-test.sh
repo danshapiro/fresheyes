@@ -205,8 +205,8 @@ detached_launch=$(
     timeout 30s bash "$RUNNER" --gpt --manual "Review README.md."
 )
 detached_pid=$(sed -n 's/^FRESHPID=//p' <<< "$detached_launch" | tr -d '[:space:]')
-if [[ ! "$detached_pid" =~ ^[0-9]+$ ]]; then
-  printf 'detached GPT review did not return a numeric PID: %s\n' "$detached_launch" >&2
+if [[ ! "$detached_pid" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$ ]]; then
+  printf 'detached GPT review did not return an opaque handle: %s\n' "$detached_launch" >&2
   exit 1
 fi
 

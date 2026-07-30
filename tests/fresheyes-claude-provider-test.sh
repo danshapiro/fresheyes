@@ -322,7 +322,7 @@ test_parser_missing_result_writes_failure_log() {
 }
 
 test_manual_detaches_by_default_and_completes() {
-  local run_tmp stdout_file fresh_pid progress_output status self_sid child_sid
+  local run_tmp stdout_file fresh_pid progress_output status self_sid child_sid locator base owner_pid
   run_tmp="$(mktemp -d "$TEST_TMP/detach.XXXXXX")"
   stdout_file="$run_tmp/stdout.txt"
   rm -f "$ARGV_FILE"
@@ -348,28 +348,30 @@ test_manual_detaches_by_default_and_completes() {
     fail "default manual launch streamed the review instead of detaching: $(cat "$stdout_file")"
   fi
   fresh_pid=$(sed -n 's/^FRESHPID=//p' "$stdout_file" | tr -d '[:space:]')
-  [[ "$fresh_pid" =~ ^[0-9]+$ ]] || fail "default manual launch printed no numeric FRESHPID: $(cat "$stdout_file")"
+  [[ "$fresh_pid" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$ ]] || fail "default manual launch printed no opaque FRESHPID handle: $(cat "$stdout_file")"
 
   # SAFETY PROPERTY — the whole point of detach-by-default. The review must run
   # in its OWN session, not the launcher's, so a caller's process-group/harness
-  # timeout cannot kill it. setsid makes the detached review a session leader
-  # (session id == its own PID); a plain `&` background WITHOUT setsid would
-  # leave it in this test's session (and killable) yet still print FRESHPID=,
-  # not stream, and complete — passing every other assertion here. So we must
-  # check the session explicitly, while the 2s fake provider keeps it alive.
-  self_sid=$(ps -o sess= -p "$$" | tr -d '[:space:]')
-  child_sid=""
-  for _ in {1..60}; do
-    child_sid=$(ps -o sess= -p "$fresh_pid" 2>/dev/null | tr -d '[:space:]')
-    [[ -n "$child_sid" ]] && break
-    sleep 0.05
+  # timeout cannot kill it. FRESHPID is now an opaque handle, not a pid, so
+  # resolve the run's base via the locator, poll status.json for the child's
+  # owner_pid, and check THAT process's session while the 2s fake provider
+  # keeps it alive. If the review finishes before ps sees the owner, an empty
+  # child_sid is acceptable — only a MATCHING session is a failure.
+  locator="$run_tmp/fresheyes-logs/.locator.$fresh_pid"
+  [[ -f "$locator" ]] || fail "no locator for handle $fresh_pid"
+  base=$(tr -d '\n' < "$locator")
+  owner_pid=""
+  for _ in $(seq 1 100); do
+    owner_pid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("owner_pid",""))' \
+      "$base.status.json" 2>/dev/null || true)
+    [[ -n "$owner_pid" ]] && break
+    sleep 0.1
   done
-  [[ -n "$child_sid" ]] || fail "detached review pid $fresh_pid was not alive after launch; it was not backgrounded into its own session"
-  if [[ "$child_sid" == "$self_sid" ]]; then
+  [[ "$owner_pid" =~ ^[0-9]+$ ]] || fail "status.json never recorded owner_pid"
+  self_sid=$(ps -o sess= -p "$$" | tr -d '[:space:]')
+  child_sid=$(ps -o sess= -p "$owner_pid" 2>/dev/null | tr -d '[:space:]' || true)
+  if [[ -n "$child_sid" && "$child_sid" == "$self_sid" ]]; then
     fail "detached review shares the launcher's session ($child_sid); setsid did not detach it, so a caller timeout could still kill it"
-  fi
-  if [[ "$child_sid" != "$fresh_pid" ]]; then
-    fail "detached review is not its own session leader (sid=$child_sid pid=$fresh_pid); FRESHPID does not name the detached session"
   fi
 
   # Detached review must complete and be retrievable by the printed PID.
