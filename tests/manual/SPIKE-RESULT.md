@@ -217,3 +217,89 @@ SPIKE_EXIT=0
 ## Outcome
 
 Task 8 pre-ship check (2026-07-29): real detached review via `FRESHEYES_DETACH=systemd-run` from a plain terminal reached `state=complete` with a verdict (handle 20260729-225607-5b2d64, provider gpt, detach_method=systemd-run) — no --setenv gaps; a first attempt with --claude ran the full mechanism (unit launched, CLI found, authenticated, API reached) but the account's weekly Claude rate limit returned 429 ("weekly limit · resets 6am"), so the gpt provider closed the authenticated-review residual instead.
+
+## End-to-end transcript (Task 9)
+
+```
+e2e tmp: /tmp/fresheyes-e2e.9RpBJI
+=== cell 1: systemd-run detach survives codex exec and completes ===
+Reading additional input from stdin...
+OpenAI Codex v0.146.0
+--------
+workdir: /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019fb1ac-4ec2-71e1-ab23-cf432af0d135
+--------
+user
+Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: env PATH="/tmp/fresheyes-e2e.9RpBJI/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-survive FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-survive FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes.sh --claude 'review HEAD'
+exec
+/bin/bash -lc 'env PATH="/tmp/fresheyes-e2e.9RpBJI/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-survive FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-survive FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes.sh --claude '"'review HEAD'" in /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics
+ succeeded in 3177ms:
+FRESHPID=20260729-231819-1acd4f
+NEXT: bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes-progress.sh --json 20260729-231819-1acd4f   (reviews take 5-30 min; poll every 30-60s)
+
+codex
+FRESHPID=20260729-231819-1acd4f
+NEXT: bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes-progress.sh --json 20260729-231819-1acd4f   (reviews take 5-30 min; poll every 30-60s)
+tokens used
+20,503
+FRESHPID=20260729-231819-1acd4f
+NEXT: bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes-progress.sh --json 20260729-231819-1acd4f   (reviews take 5-30 min; poll every 30-60s)
+codex exec returned at: 1785392303.863622347
+handle: 20260729-231819-1acd4f
+cell 1 survival proven: owner 1489553 alive after codex exec return (1785392303.863622347)
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=complete
+{"detach_method":"systemd-run","exit_code":0,"handle":"20260729-231819-1acd4f","heartbeat_at":1785392330.1650968,"last_log_mtime_epoch":1785392330,"last_provider_event":"result","launched_at":1785392299.0,"line_count":5,"log_path":"/tmp/fresheyes-e2e.9RpBJI/logs-survive/fresheyes-20260729-231819-1acd4f.log","mode":"manual","owner_pid":1489553,"owner_pid_state":"missing","pid":"20260729-231819-1acd4f","pid_state":"unknown","provider":"claude","provider_events":2,"result_available":true,"runner_state":"complete","state":"complete","status_path":"/tmp/fresheyes-e2e.9RpBJI/logs-survive/fresheyes-20260729-231819-1acd4f.log.status.json","updated_at_epoch":1785392330.1650965,"verdict":"passed"}
+cell 1 PASSED: detached review survived codex exec (owner alive post-return) and completed
+
+=== cell 2: bus absent -> setsid fallback -> harness kill -> killed_at_launch ===
+Reading additional input from stdin...
+OpenAI Codex v0.146.0
+--------
+workdir: /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics
+model: gpt-5.6-sol
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: none
+session id: 019fb1ac-fc2b-7470-9bc2-ac67697fcd6f
+--------
+user
+Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS PATH="/tmp/fresheyes-e2e.9RpBJI/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-killed FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-killed FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes.sh --claude 'review HEAD'
+exec
+/bin/bash -lc 'env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS PATH="/tmp/fresheyes-e2e.9RpBJI/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-killed FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.9RpBJI/logs-killed FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes.sh --claude '"'review HEAD'" in /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics
+ succeeded in 4512ms:
+FRESHPID=20260729-231906-07847d
+NEXT: bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes-progress.sh --json 20260729-231906-07847d   (reviews take 5-30 min; poll every 30-60s)
+
+codex
+FRESHPID=20260729-231906-07847d
+NEXT: bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes-progress.sh --json 20260729-231906-07847d   (reviews take 5-30 min; poll every 30-60s)
+tokens used
+20,478
+FRESHPID=20260729-231906-07847d
+NEXT: bash /home/dan/code/fresheyes/.worktrees/detached-review-ergonomics/skills/fresheyes/fresheyes-progress.sh --json 20260729-231906-07847d   (reviews take 5-30 min; poll every 30-60s)
+handle: 20260729-231906-07847d
+poll output: {"detach_method":"setsid","handle":"20260729-231906-07847d","launched_at":1785392346.0,"line_count":0,"log_path":"/tmp/fresheyes-e2e.9RpBJI/logs-killed/fresheyes-20260729-231906-07847d.log","message":"the review child never wrote its first heartbeat \u2014 commonly because the calling harness kills or reaps detached processes when the launch command exits; re-run the same command with --foreground (works regardless of cause)","mode":"manual","pid":"20260729-231906-07847d","pid_state":"unknown","provider":"claude","result_available":false,"runner_state":"launching","state":"killed_at_launch","status_path":"/tmp/fresheyes-e2e.9RpBJI/logs-killed/fresheyes-20260729-231906-07847d.log.status.json","updated_at_epoch":1785392346.3309557}
+poll exit: 3
+cell 2 PASSED: loud killed_at_launch with remediation
+
+e2e done. Record this transcript in tests/manual/SPIKE-RESULT.md and the commit body.
+E2E_EXIT=0
+```
