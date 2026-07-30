@@ -729,7 +729,12 @@ STREAM_LOG="$LOG_FILE.stream.jsonl"
 STDERR_LOG="$LOG_FILE.stderr"
 STATUS_FILE="$LOG_FILE.status.json"
 LAUNCH_STDERR="$LOG_FILE.launch.stderr"
-DETACH_METHOD="setsid"
+# The detached child must record the parent's ACTUAL detach method:
+# write_status overwrites detach_method on every write, so a child that
+# hardcoded "setsid" would clobber a systemd-run launch's method on its
+# first "running" write. The parent forwards FRESHEYES_DETACH_METHOD in
+# both launch paths (Task 3 setsid prefix; Task 8 --setenv).
+DETACH_METHOD="${FRESHEYES_DETACH_METHOD:-setsid}"
 LAUNCHED_AT_EPOCH="$(date +%s)"
 OWNER_PID=""
 ```
@@ -782,7 +787,11 @@ if detach_method:
 
 tmp_path = f"{path}.tmp.{os.getpid()}"
 with open(tmp_path, "w", encoding="utf-8") as handle:
-    json.dump(record, handle)
+    # Keep the current writer's exact serialization (compact separators +
+    # sorted keys + trailing newline): the provider tests assert compact
+    # substrings like '"state":"complete"' against this file.
+    json.dump(record, handle, separators=(",", ":"), sort_keys=True)
+    handle.write("\n")
 os.replace(tmp_path, path)
 PY
 }
@@ -818,6 +827,7 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
   fi
   write_status "launching" "" ""
   FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
+  FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
     setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
   echo "FRESHPID=$HANDLE"
   exit 0
@@ -1355,6 +1365,14 @@ elif [[ "$STATUS_STATE" == "launching" ]]; then
     STATE_EXIT_CODE=3
     MESSAGE=$(_killed_at_launch_message "$LOG_FILE")
   fi
+elif [[ "$STATUS_STATE" == "failed" ]]; then
+  # Terminal child-recorded failure: report immediately. This branch MUST
+  # precede the heartbeat-freshness check — the runner stamps heartbeat_at
+  # on the terminal "failed" write too, so freshness-first would mask a
+  # recorded failure as healthy "running" for up to STALE_SECS.
+  REVIEW_STATE="died"
+  STATE_EXIT_CODE=4
+  MESSAGE=$(_died_message "$LOG_FILE")
 elif _epoch_within "$HEARTBEAT_AT" "$STALE_SECS" || _owner_alive; then
   REVIEW_STATE="running"
 elif [[ -z "$STATUS_STATE" && ! -s "$LOG_FILE" && -n "$PID" ]] && ! _owner_alive; then
@@ -1433,7 +1451,7 @@ Expected: PASS — all of legs (c) both variants, (d), (e), the launching test, 
 
 Run: `bash tests/fresheyes-progress-test.sh` — expect failures where assertions encode the deleted states. Apply these mappings (find each by its assertion line):
 - Fixtures with a dead pid and NO terminal status.json that previously asserted `state=failed`: now `died` when the log has content, `killed_at_launch` when the log is missing/empty. Update the expected values accordingly and add `FRESHEYES_HEARTBEAT_STALE_SECS`/`FRESHEYES_LAUNCH_GRACE_SECS` overrides only if a test would otherwise wait.
-- The fixture with `{"state":"failed",...,"exit_code":1}` (`:318` area): expect `state=died` and assert the message contains `exit_code=1`.
+- The fixture with `{"state":"failed",...,"exit_code":1}` (`:318` area): expect `state=died` and assert the message contains `exit_code=1`. IMPORTANT: also add a FRESH `"heartbeat_at"` to this fixture (write it at test runtime, e.g. `"heartbeat_at": $(date +%s)`), because the real runner stamps `heartbeat_at` on the terminal `failed` write; without it the test passes vacuously and would not catch a state machine that checks heartbeat freshness before the `failed` branch (which would misreport the failure as `running` for up to `FRESHEYES_HEARTBEAT_STALE_SECS`).
 - `test_global_locator_ignores_external_log_by_default` (old `:485`): expected state changes `missing` → `unknown_handle`; the recovery leg via `FRESHEYES_ALLOW_LEGACY_PROGRESS=1 --result` is unchanged.
 - Any test asserting `--json` always exits 0 for these fixtures: expect 3/4/5 per the table.
 - Tests asserting `state=running` for live-pid fixtures keep passing (owner alive → running).
@@ -1675,11 +1693,12 @@ Note: two codex binaries exist on this dev machine (nvm npm 0.145.0 vs `~/.local
 
 ```bash
   FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
+  FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
   FRESHEYES_CODEX_BIN="${CODEX_BIN:-}" FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-}" \
     setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
 ```
 
-(Guard with `${VAR:-}` — only the active provider's BIN is set under `set -u`.)
+(Guard with `${VAR:-}` — only the active provider's BIN is set under `set -u`. The `FRESHEYES_DETACH_METHOD` forward is Task 3's line, kept as-is.)
 
 - [ ] **Step 4: Run the tests**
 
@@ -1710,7 +1729,7 @@ needed because systemd-run units do not inherit the caller's PATH."
 - Test: `tests/fresheyes-detach-test.sh`
 
 **Interfaces:**
-- Consumes: `tests/manual/SPIKE-RESULT.md` (`PREMISE: PASS` / `PREMISE: FAIL` / `PREMISE: INCONCLUSIVE`); Task 3's `DETACH_METHOD` global and `write_status` (which overwrites `detach_method`); Task 7's `FRESHEYES_*_BIN` forwarding.
+- Consumes: `tests/manual/SPIKE-RESULT.md` (`PREMISE: PASS` / `PREMISE: FAIL` / `PREMISE: INCONCLUSIVE`); Task 3's `DETACH_METHOD` global (child inherits the parent's method via `FRESHEYES_DETACH_METHOD`) and `write_status` (which overwrites `detach_method`); Task 7's `FRESHEYES_*_BIN` forwarding.
 - Produces: `_probe_systemd_run()` (runtime probe with a hard 2s timeout, by launching a trivial unit — never `command -v` alone); `launch_via_systemd_run()`; env override `FRESHEYES_DETACH=auto|setsid|systemd-run` (default `auto`); `detach_method` recorded in status.json (`systemd-run` or `setsid`); caller-facing receipt IDENTICAL on both paths.
 
 - [ ] **Step 0: Read the gate**
@@ -1770,6 +1789,7 @@ test_systemd_run_detach_forwards_env_and_records_method() {
   assert_contains "$argv" "FRESHEYES_DAEMONIZED=1" "sdrun forwards daemonize sentinel"
   assert_contains "$argv" "FRESHEYES_HANDLE=$handle" "sdrun forwards handle"
   assert_contains "$argv" "FRESHEYES_LOG_FILE=" "sdrun forwards log file"
+  assert_contains "$argv" "FRESHEYES_DETACH_METHOD=systemd-run" "sdrun forwards detach method"
   assert_contains "$argv" "FRESHEYES_CLAUDE_BIN=" "sdrun forwards provider bin"
   assert_contains "$argv" "PATH=" "sdrun forwards PATH"
   assert_contains "$argv" "WorkingDirectory=" "sdrun sets working directory"
@@ -1828,6 +1848,7 @@ launch_via_systemd_run() {
     --setenv "FRESHEYES_DAEMONIZED=1"
     --setenv "FRESHEYES_HANDLE=$HANDLE"
     --setenv "FRESHEYES_LOG_FILE=$LOG_FILE"
+    --setenv "FRESHEYES_DETACH_METHOD=systemd-run"
     --setenv "PATH=$PATH"
     --setenv "HOME=$HOME"
   )
@@ -1868,9 +1889,11 @@ Replace the launch portion of the detach block (after the tracker/status writes)
     *)           echo "Error: FRESHEYES_DETACH must be auto, setsid, or systemd-run." >&2; exit 1 ;;
   esac
 
-  # Status must carry the final detach_method BEFORE the child launches
-  # (the child's first "running" write merges into it; write_status
-  # overwrites detach_method, so the fallback rewrite below is safe).
+  # Status must carry the final detach_method BEFORE the child launches.
+  # write_status overwrites detach_method, so the fallback rewrite below is
+  # safe — and for the same reason the child MUST inherit the chosen method
+  # via FRESHEYES_DETACH_METHOD (setsid env prefix / --setenv above): its
+  # own writes would otherwise clobber the field back to "setsid".
   write_status "launching" "" ""
   if [[ "$DETACH_METHOD" == "systemd-run" ]]; then
     if ! launch_via_systemd_run; then
@@ -1884,6 +1907,7 @@ Replace the launch portion of the detach block (after the tracker/status writes)
       exit 2
     fi
     FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
+    FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
     FRESHEYES_CODEX_BIN="${CODEX_BIN:-}" FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-}" \
       setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
   fi
