@@ -213,3 +213,7 @@ literal 'PREMISE: ...' and 'RUNS: ...' lines verbatim (PASS / FAIL / INCONCLUSIV
 and paste this full transcript into the file.
 SPIKE_EXIT=0
 ```
+
+## Outcome
+
+Task 8 pre-ship check (2026-07-29): real detached review via `FRESHEYES_DETACH=systemd-run` from a plain terminal reached `state=complete` with a verdict (handle 20260729-225607-5b2d64, provider gpt, detach_method=systemd-run) — no --setenv gaps; a first attempt with --claude ran the full mechanism (unit launched, CLI found, authenticated, API reached) but the account's weekly Claude rate limit returned 429 ("weekly limit · resets 6am"), so the gpt provider closed the authenticated-review residual instead.

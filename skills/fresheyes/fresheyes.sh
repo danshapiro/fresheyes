@@ -329,6 +329,51 @@ os.replace(tmp_path, path)
 PY
 }
 
+# Runtime probe: systemd-run being installed is NOT enough (the user bus can
+# be unreachable in some harnesses). Prove it by launching a trivial unit.
+_probe_systemd_run() {
+  command -v systemd-run &> /dev/null || return 1
+  # Hard 2s cap (measured): healthy-bus probe is 0.02-0.28s, but a half-up
+  # (accepting-but-mute) bus socket blocks the probe >40s in the sd-bus auth
+  # handshake — dead/absent sockets fail in 0.01s, only the half-up case hangs.
+  timeout 2s systemd-run --user --collect --quiet --wait /bin/true >/dev/null 2>&1
+}
+
+launch_via_systemd_run() {
+  local script_abs="$SCRIPT_DIR/$(basename -- "$0")"
+  # These must be in the environment BEFORE the forward loop reads them.
+  FRESHEYES_CODEX_BIN="${CODEX_BIN:-${FRESHEYES_CODEX_BIN:-}}"
+  FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-${FRESHEYES_CLAUDE_BIN:-}}"
+  local -a setenv_args=(
+    --setenv "FRESHEYES_DAEMONIZED=1"
+    --setenv "FRESHEYES_HANDLE=$HANDLE"
+    --setenv "FRESHEYES_LOG_FILE=$LOG_FILE"
+    --setenv "FRESHEYES_DETACH_METHOD=systemd-run"
+    --setenv "PATH=$PATH"
+    --setenv "HOME=$HOME"
+  )
+  # The unit inherits NOTHING from the caller: forward every var the child
+  # needs explicitly (verified live: nvm-installed CLIs vanish otherwise).
+  local var
+  for var in FRESHEYES_LOG_DIR FRESHEYES_GLOBAL_LOG_DIR FRESHEYES_MODE \
+             FRESHEYES_PROVIDER FRESHEYES_GPT_MODEL FRESHEYES_CLAUDE_MODEL \
+             FRESHEYES_MODEL FRESHEYES_CODEX_BIN FRESHEYES_CLAUDE_BIN \
+             FRESHEYES_HEARTBEAT_SECS TMPDIR \
+             FRESHEYES_FAKE_ARGV FRESHEYES_FAKE_DELAY \
+             FRESHEYES_FAKE_CLAUDE_VERSION FRESHEYES_FAKE_CLAUDE_VERSION_PROBE \
+             FRESHEYES_FAKE_VERSION FRESHEYES_FAKE_VERSION_PROBE; do
+    if [[ -n "${!var:-}" ]]; then
+      setenv_args+=(--setenv "$var=${!var}")
+    fi
+  done
+  systemd-run --user --collect --quiet \
+    --property=WorkingDirectory="$PWD" \
+    --property=StandardOutput=null \
+    --property=StandardError="append:$LAUNCH_STDERR" \
+    "${setenv_args[@]}" \
+    /usr/bin/env bash "$script_abs" "${ORIG_ARGS[@]}" >/dev/null 2>>"$LAUNCH_STDERR"
+}
+
 # --- Detach manual reviews into their own session (default) ---
 # Manual reviews are long (5-30 min). By default we re-exec under setsid so the
 # review survives the caller's process group — e.g. an agent harness timeout on
@@ -338,21 +383,43 @@ PY
 # stops the child re-detaching. Automatic mode (the pre-commit gate) and
 # --foreground both skip this and run synchronously.
 if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}" != "1" ]]; then
-  if ! command -v setsid &> /dev/null; then
-    echo "Error: cannot detach the review: setsid (util-linux) not found. Re-run with --foreground to run synchronously." >&2
-    exit 2
-  fi
   # Parent-owned identity: locator + initial status exist BEFORE the child
   # runs, so a child killed at launch still leaves a loud, diagnosable trail.
   write_tracker_alias "$LOG_DIR" ".locator.$HANDLE"
   if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
     write_tracker_alias "$GLOBAL_LOG_DIR" ".locator.$HANDLE"
   fi
+
+  DETACH_METHOD="setsid"
+  case "${FRESHEYES_DETACH:-auto}" in
+    systemd-run) DETACH_METHOD="systemd-run" ;;
+    setsid)      DETACH_METHOD="setsid" ;;
+    auto)        if _probe_systemd_run; then DETACH_METHOD="systemd-run"; fi ;;
+    *)           echo "Error: FRESHEYES_DETACH must be auto, setsid, or systemd-run." >&2; exit 1 ;;
+  esac
+
+  # Status must carry the final detach_method BEFORE the child launches.
+  # write_status overwrites detach_method, so the fallback rewrite below is
+  # safe — and for the same reason the child MUST inherit the chosen method
+  # via FRESHEYES_DETACH_METHOD (setsid env prefix / --setenv above): its
+  # own writes would otherwise clobber the field back to "setsid".
   write_status "launching" "" ""
-  FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
-  FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
-  FRESHEYES_CODEX_BIN="${CODEX_BIN:-}" FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-}" \
-    setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
+  if [[ "$DETACH_METHOD" == "systemd-run" ]]; then
+    if ! launch_via_systemd_run; then
+      DETACH_METHOD="setsid"
+      write_status "launching" "" ""
+    fi
+  fi
+  if [[ "$DETACH_METHOD" == "setsid" ]]; then
+    if ! command -v setsid &> /dev/null; then
+      echo "Error: cannot detach the review: setsid (util-linux) not found. Re-run with --foreground to run synchronously." >&2
+      exit 2
+    fi
+    FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
+    FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
+    FRESHEYES_CODEX_BIN="${CODEX_BIN:-}" FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-}" \
+      setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
+  fi
   echo "FRESHPID=$HANDLE"
   echo "NEXT: bash $SCRIPT_DIR/fresheyes-progress.sh --json $HANDLE   (reviews take 5-30 min; poll every 30-60s)"
   exit 0

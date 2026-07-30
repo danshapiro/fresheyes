@@ -437,6 +437,85 @@ test_forwarded_bin_cheap_recheck() {
   [[ "$final_state" == "complete" ]] || fail "forwarded-bin review state: $final_state"
 }
 
+# --- systemd-run detach path (Task 8) ---
+# Fake systemd-run: records its argv, then execs the wrapped command with
+# the --setenv environment applied (simulating the unit's clean env).
+make_fake_systemd_run() {
+  cat > "$FAKE_BIN/systemd-run" <<'FAKE'
+#!/usr/bin/env bash
+argv_log="${FRESHEYES_TEST_SDRUN_ARGV:?}"
+printf '%s\n' "$@" > "$argv_log"
+declare -a child_env=() cmd=()
+seen_cmd=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --setenv)      child_env+=("$2"); shift 2 ;;
+    --user|--collect|--quiet|--wait) shift ;;
+    --property=*)  shift ;;
+    *)             cmd+=("$1"); seen_cmd=1; shift ;;
+  esac
+done
+if [[ "$seen_cmd" -eq 0 ]]; then exit 1; fi
+# Run detached-ish: background with a clean env (unit semantics).
+env -i "${child_env[@]}" "${cmd[@]}" &
+exit 0
+FAKE
+  chmod +x "$FAKE_BIN/systemd-run"
+}
+
+test_systemd_run_detach_forwards_env_and_records_method() {
+  local log_dir="$TEST_TMP/logs-sdrun"
+  mkdir -p "$log_dir"
+  make_fake_systemd_run
+  local argv_log="$TEST_TMP/sdrun-argv.txt"
+  local stdout
+  stdout=$(FRESHEYES_DETACH=systemd-run FRESHEYES_TEST_SDRUN_ARGV="$argv_log" \
+    launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  rm -f "$FAKE_BIN/systemd-run"
+  local handle
+  handle=$(parse_handle "$stdout")
+  # Receipt shape identical to the setsid path (2 lines incl. NEXT).
+  [[ "$(wc -l <<<"$stdout")" -eq 2 ]] || fail "systemd-run receipt not 2 lines: $stdout"
+
+  local argv
+  argv=$(cat "$argv_log")
+  assert_contains "$argv" "--user" "sdrun argv --user"
+  assert_contains "$argv" "--collect" "sdrun argv --collect"
+  assert_contains "$argv" "FRESHEYES_DAEMONIZED=1" "sdrun forwards daemonize sentinel"
+  assert_contains "$argv" "FRESHEYES_HANDLE=$handle" "sdrun forwards handle"
+  assert_contains "$argv" "FRESHEYES_LOG_FILE=" "sdrun forwards log file"
+  assert_contains "$argv" "FRESHEYES_DETACH_METHOD=systemd-run" "sdrun forwards detach method"
+  assert_contains "$argv" "FRESHEYES_CLAUDE_BIN=" "sdrun forwards provider bin"
+  assert_contains "$argv" "PATH=" "sdrun forwards PATH"
+  assert_contains "$argv" "WorkingDirectory=" "sdrun sets working directory"
+  assert_contains "$argv" "StandardError=append:" "sdrun captures launch stderr"
+
+  local output
+  output=$(wait_for_state "$log_dir" "$handle" "complete" "systemd-run detach")
+  [[ "$(json_field "$output" "detach_method")" == "systemd-run" ]] \
+    || fail "detach_method not recorded: $output"
+}
+
+test_bus_absent_probe_falls_back_to_setsid() {
+  local log_dir="$TEST_TMP/logs-nobus"
+  mkdir -p "$log_dir"
+  # No fake systemd-run on PATH; unset the bus env so the REAL probe (if
+  # systemd-run exists) fails, engaging the setsid fallback.
+  local stdout
+  stdout=$(env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS \
+    TMPDIR="$TEST_TMP" \
+    FRESHEYES_LOG_DIR="$log_dir" FRESHEYES_GLOBAL_LOG_DIR="$log_dir" \
+    FRESHEYES_CLAUDE_MODEL="" FRESHEYES_GPT_MODEL="" FRESHEYES_MODEL="" \
+    PATH="$FAKE_BIN:$PATH" \
+    timeout 60s bash "$RUNNER" --claude "review HEAD")
+  local handle
+  handle=$(parse_handle "$stdout")
+  local output
+  output=$(wait_for_state "$log_dir" "$handle" "complete" "bus-absent fallback")
+  [[ "$(json_field "$output" "detach_method")" == "setsid" ]] \
+    || fail "bus-absent launch should fall back to setsid: $output"
+}
+
 # --- (f) progress never writes, across every state
 test_progress_read_only_all_states() {
   for dir in "$TEST_TMP"/logs-*; do
@@ -474,6 +553,8 @@ test_died_midreview
 test_unknown_handle
 test_launching_state_is_calm
 test_forwarded_bin_cheap_recheck
+test_systemd_run_detach_forwards_env_and_records_method
+test_bus_absent_probe_falls_back_to_setsid
 test_progress_read_only_all_states
 
 printf 'fresheyes-detach tests passed\n'
