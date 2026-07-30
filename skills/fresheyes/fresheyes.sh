@@ -484,27 +484,8 @@ manual_verdict_from_log() {
   if [[ "$PROVIDER" == "gpt" && -s "$RESULT_FILE" ]]; then
     review_file="$RESULT_FILE"
   fi
-  if [[ ! -f "$review_file" ]]; then
-    return 1
-  fi
-
-  python3 - "$review_file" <<'PY' 2>/dev/null
-import re
-import sys
-from pathlib import Path
-
-try:
-    text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-except OSError:
-    raise SystemExit(1)
-
-verdict = ""
-for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
-    verdict = match.group(1).lower()
-if not verdict:
-    raise SystemExit(1)
-print(verdict)
-PY
+  # Shared with fresheyes-progress.sh: the one home for the verdict marker.
+  python3 "$SCRIPT_DIR/fresheyes-verdict.py" "$review_file" 2>/dev/null
 }
 
 _cleanup() {

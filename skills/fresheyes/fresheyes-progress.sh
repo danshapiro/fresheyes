@@ -14,6 +14,9 @@
 # With --json: returns compact machine-readable status for polling.
 # With --result: returns final review text only after completion.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Shared with fresheyes.sh: the one home for the verdict marker.
+VERDICT_PARSER="$SCRIPT_DIR/fresheyes-verdict.py"
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
 ALLOW_LEGACY_PROGRESS="${FRESHEYES_ALLOW_LEGACY_PROGRESS:-0}"
@@ -280,27 +283,7 @@ line_count_or_zero() {
 
 detect_manual_verdict() {
   local base="$1"
-  if [[ ! -f "$base" ]]; then
-    return 1
-  fi
-
-  python3 - "$base" <<'PY' 2>/dev/null
-import re
-import sys
-from pathlib import Path
-
-try:
-    text = Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
-except OSError:
-    raise SystemExit(1)
-
-verdict = ""
-for match in re.finditer(r"INDEPENDENT CODE REVIEW\s+(PASSED|FAILED)\b", text, re.IGNORECASE):
-    verdict = match.group(1).lower()
-if not verdict:
-    raise SystemExit(1)
-print(verdict)
-PY
+  python3 "$VERDICT_PARSER" "$base" 2>/dev/null
 }
 
 print_final_review_if_nonempty() {
