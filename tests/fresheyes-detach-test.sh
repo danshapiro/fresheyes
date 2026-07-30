@@ -49,6 +49,8 @@ snapshot_dir() {
 
 # Fake claude provider: emits a minimal valid stream and a PASSED verdict.
 # FRESHEYES_FAKE_DELAY (seconds) stretches the review for liveness tests.
+# FRESHEYES_FAKE_ARGV (path) records the review invocation's argv (one
+# element per line; --version probes are not recorded).
 make_fake_claude() {
   cat > "$FAKE_BIN/claude" <<'FAKE'
 #!/usr/bin/env python3
@@ -57,6 +59,10 @@ import json, os, sys, time
 if "--version" in sys.argv:
     print(os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION", "2.1.170 (Claude Code)"))
     sys.exit(0)
+argv_path = os.environ.get("FRESHEYES_FAKE_ARGV")
+if argv_path:
+    with open(argv_path, "w", encoding="utf-8") as handle:
+        handle.write("\n".join(sys.argv))
 delay = float(os.environ.get("FRESHEYES_FAKE_DELAY", "0"))
 print(json.dumps({"type": "system", "subtype": "init"}), flush=True)
 if delay:
@@ -438,8 +444,13 @@ test_forwarded_bin_cheap_recheck() {
 }
 
 # --- systemd-run detach path (Task 8) ---
-# Fake systemd-run: records its argv, then execs the wrapped command with
-# the --setenv environment applied (simulating the unit's clean env).
+# Fake systemd-run: records its argv, applies real systemd's ExecStart-style
+# variable expansion to the wrapped command argv, then runs it with the
+# --setenv environment applied (simulating the unit's clean env).
+# The expansion model matches live-probed systemd behavior: ${VAR} expands
+# from the unit environment (empty when unset), $$ unescapes to $, and bare
+# $VAR survives untouched. Without this modeling, the runner's $-escaping
+# regression (user scope text silently corrupted) would be untestable.
 make_fake_systemd_run() {
   cat > "$FAKE_BIN/systemd-run" <<'FAKE'
 #!/usr/bin/env bash
@@ -456,9 +467,53 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 if [[ "$seen_cmd" -eq 0 ]]; then exit 1; fi
+# Model real systemd's expansion of the unit argv (probed live):
+# ${VAR} -> value from the unit env (empty when unset), $$ -> $,
+# bare $VAR left alone.
+mapfile -d '' -t cmd < <(python3 - "${child_env[@]}" -- "${cmd[@]}" <<'PY'
+import sys
+args = sys.argv[1:]
+split = args.index("--")
+env = dict(entry.split("=", 1) for entry in args[:split])
+out = []
+for arg in args[split + 1:]:
+    result = []
+    i = 0
+    while i < len(arg):
+        if arg.startswith("$$", i):
+            result.append("$")
+            i += 2
+        elif arg.startswith("${", i):
+            end = arg.find("}", i)
+            if end == -1:
+                result.append(arg[i:])
+                i = len(arg)
+            else:
+                result.append(env.get(arg[i + 2:end], ""))
+                i = end + 1
+        else:
+            result.append(arg[i])
+            i += 1
+    out.append("".join(result))
+sys.stdout.write("\x00".join(out) + "\x00")
+PY
+)
 # Run detached-ish: background with a clean env (unit semantics).
 env -i "${child_env[@]}" "${cmd[@]}" &
 exit 0
+FAKE
+  chmod +x "$FAKE_BIN/systemd-run"
+}
+
+# Fake systemd-run that records its argv, then fails (probe passed but the
+# transient unit could not start, e.g. bus reset mid-launch).
+make_failing_systemd_run() {
+  cat > "$FAKE_BIN/systemd-run" <<'FAKE'
+#!/usr/bin/env bash
+argv_log="${FRESHEYES_TEST_SDRUN_ARGV:?}"
+printf '%s\n' "$@" > "$argv_log"
+echo "Failed to start transient service unit: Connection reset by peer" >&2
+exit 1
 FAKE
   chmod +x "$FAKE_BIN/systemd-run"
 }
@@ -470,6 +525,7 @@ test_systemd_run_detach_forwards_env_and_records_method() {
   local argv_log="$TEST_TMP/sdrun-argv.txt"
   local stdout
   stdout=$(FRESHEYES_DETACH=systemd-run FRESHEYES_TEST_SDRUN_ARGV="$argv_log" \
+    HTTPS_PROXY="http://proxy.example:3128" NODE_EXTRA_CA_CERTS="/etc/ssl/corp.pem" \
     launch "$log_dir" "$RUNNER" --claude "review HEAD")
   rm -f "$FAKE_BIN/systemd-run"
   local handle
@@ -487,6 +543,8 @@ test_systemd_run_detach_forwards_env_and_records_method() {
   assert_contains "$argv" "FRESHEYES_DETACH_METHOD=systemd-run" "sdrun forwards detach method"
   assert_contains "$argv" "FRESHEYES_CLAUDE_BIN=" "sdrun forwards provider bin"
   assert_contains "$argv" "PATH=" "sdrun forwards PATH"
+  assert_contains "$argv" "HTTPS_PROXY=http://proxy.example:3128" "sdrun forwards proxy vars"
+  assert_contains "$argv" "NODE_EXTRA_CA_CERTS=/etc/ssl/corp.pem" "sdrun forwards CA vars"
   assert_contains "$argv" "WorkingDirectory=" "sdrun sets working directory"
   assert_contains "$argv" "StandardError=append:" "sdrun captures launch stderr"
 
@@ -494,6 +552,52 @@ test_systemd_run_detach_forwards_env_and_records_method() {
   output=$(wait_for_state "$log_dir" "$handle" "complete" "systemd-run detach")
   [[ "$(json_field "$output" "detach_method")" == "systemd-run" ]] \
     || fail "detach_method not recorded: $output"
+}
+
+# Regression (systemd ${VAR} expansion): a scope containing literal ${HOME}
+# / $PATH must reach the provider byte-identical on the systemd-run path.
+# The fake systemd-run models real systemd's argv expansion, so this fails
+# if the runner stops escaping '$' as '$$'.
+test_systemd_run_scope_dollar_sequences_survive() {
+  local log_dir="$TEST_TMP/logs-sddollar"
+  mkdir -p "$log_dir"
+  make_fake_systemd_run
+  local argv_log="$TEST_TMP/sdrun-dollar-argv.txt"
+  local fake_argv="$TEST_TMP/sdrun-dollar-claude-argv.txt"
+  # Single-quoted: bash must NOT expand these; they are user scope text.
+  local scope='review the ${HOME} and $PATH handling in foo.sh'
+  local stdout
+  stdout=$(FRESHEYES_DETACH=systemd-run FRESHEYES_TEST_SDRUN_ARGV="$argv_log" \
+    FRESHEYES_FAKE_ARGV="$fake_argv" \
+    launch "$log_dir" "$RUNNER" --claude "$scope")
+  rm -f "$FAKE_BIN/systemd-run"
+  local handle
+  handle=$(parse_handle "$stdout")
+  wait_for_state "$log_dir" "$handle" "complete" "dollar-scope systemd-run" >/dev/null
+  [[ -s "$fake_argv" ]] || fail "fake claude never recorded its argv"
+  assert_contains "$(cat "$fake_argv")" "$scope" \
+    "scope with literal \${HOME}/\$PATH must reach the provider intact"
+}
+
+# Probe/force passes but the transient unit fails to start: the parent must
+# fall back to setsid, the review must complete, and the fallback rewrite
+# must leave detach_method=setsid in the final status.json.
+test_systemd_run_launch_failure_falls_back_to_setsid() {
+  local log_dir="$TEST_TMP/logs-sdfall"
+  mkdir -p "$log_dir"
+  make_failing_systemd_run
+  local argv_log="$TEST_TMP/sdrun-fail-argv.txt"
+  local stdout
+  stdout=$(FRESHEYES_DETACH=systemd-run FRESHEYES_TEST_SDRUN_ARGV="$argv_log" \
+    launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  rm -f "$FAKE_BIN/systemd-run"
+  local handle
+  handle=$(parse_handle "$stdout")
+  [[ -s "$argv_log" ]] || fail "failing systemd-run was never invoked"
+  local output
+  output=$(wait_for_state "$log_dir" "$handle" "complete" "systemd-run launch-failure fallback")
+  [[ "$(json_field "$output" "detach_method")" == "setsid" ]] \
+    || fail "launch failure must rewrite detach_method=setsid: $output"
 }
 
 test_bus_absent_probe_falls_back_to_setsid() {
@@ -554,6 +658,8 @@ test_unknown_handle
 test_launching_state_is_calm
 test_forwarded_bin_cheap_recheck
 test_systemd_run_detach_forwards_env_and_records_method
+test_systemd_run_scope_dollar_sequences_survive
+test_systemd_run_launch_failure_falls_back_to_setsid
 test_bus_absent_probe_falls_back_to_setsid
 test_progress_read_only_all_states
 

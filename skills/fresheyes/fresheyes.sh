@@ -359,6 +359,9 @@ launch_via_systemd_run() {
              FRESHEYES_PROVIDER FRESHEYES_GPT_MODEL FRESHEYES_CLAUDE_MODEL \
              FRESHEYES_MODEL FRESHEYES_CODEX_BIN FRESHEYES_CLAUDE_BIN \
              FRESHEYES_HEARTBEAT_SECS TMPDIR \
+             HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy \
+             ALL_PROXY SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE \
+             NODE_EXTRA_CA_CERTS CURL_CA_BUNDLE \
              FRESHEYES_FAKE_ARGV FRESHEYES_FAKE_DELAY \
              FRESHEYES_FAKE_CLAUDE_VERSION FRESHEYES_FAKE_CLAUDE_VERSION_PROBE \
              FRESHEYES_FAKE_VERSION FRESHEYES_FAKE_VERSION_PROBE; do
@@ -366,12 +369,23 @@ launch_via_systemd_run() {
       setenv_args+=(--setenv "$var=${!var}")
     fi
   done
+  # systemd applies ExecStart-style variable expansion to transient-unit argv
+  # (probed live on this machine: '${PATH}' expands, bare '$HOME' survives,
+  # '$$' unescapes to '$'), so a scope like 'review the ${VAR} handling' would
+  # be silently corrupted. Escape every '$' as '$$'; systemd unescapes it back,
+  # delivering the child's argv byte-identical to ORIG_ARGS. --setenv VALUES
+  # are not expansion-subject, so the forwards above need no escaping.
+  local -a unit_args=()
+  local arg
+  for arg in "${ORIG_ARGS[@]}"; do
+    unit_args+=("${arg//'$'/'$$'}")
+  done
   systemd-run --user --collect --quiet \
     --property=WorkingDirectory="$PWD" \
     --property=StandardOutput=null \
     --property=StandardError="append:$LAUNCH_STDERR" \
     "${setenv_args[@]}" \
-    /usr/bin/env bash "$script_abs" "${ORIG_ARGS[@]}" >/dev/null 2>>"$LAUNCH_STDERR"
+    /usr/bin/env bash "$script_abs" "${unit_args[@]}" >/dev/null 2>>"$LAUNCH_STDERR"
 }
 
 # --- Detach manual reviews into their own session (default) ---
