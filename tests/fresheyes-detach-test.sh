@@ -173,9 +173,71 @@ test_mint_handle_suffix_always_has_hex_letter() {
   done
 }
 
+# Heartbeat: with a slowed fake provider and a 1s heartbeat period, the
+# status.json heartbeat_at field must advance while the review runs.
+test_heartbeat_advances() {
+  local log_dir="$TEST_TMP/logs-hb"
+  mkdir -p "$log_dir"
+  local stdout
+  stdout=$(FRESHEYES_HEARTBEAT_SECS=1 FRESHEYES_FAKE_DELAY=6 \
+    launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  local handle
+  handle=$(parse_handle "$stdout")
+  local base=""
+  for _ in $(seq 1 50); do
+    [[ -f "$log_dir/.locator.$handle" ]] && base=$(tr -d '\n' < "$log_dir/.locator.$handle") && break
+    sleep 0.1
+  done
+  [[ -n "$base" ]] || fail "heartbeat test: locator never appeared"
+
+  hb_at() {
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("heartbeat_at",0))' \
+      "$base.status.json" 2>/dev/null || echo 0
+  }
+  local first="0"
+  for _ in $(seq 1 50); do
+    first=$(hb_at)
+    [[ "$first" != "0" ]] && break
+    sleep 0.1
+  done
+  [[ "$first" != "0" ]] || fail "heartbeat_at never written"
+  sleep 2.5
+  local second
+  second=$(hb_at)
+  python3 -c 'import sys; sys.exit(0 if float(sys.argv[2]) > float(sys.argv[1]) else 1)' \
+    "$first" "$second" || fail "heartbeat_at did not advance ($first -> $second)"
+  wait_for_state "$log_dir" "$handle" "complete" "heartbeat run completes" >/dev/null
+}
+
+# Terminal-state precedence: a stale touch_heartbeat must never resurrect
+# state=running over a terminal record (the orphaned-python interleaving —
+# kill $HEARTBEAT_PID covers only the subshell). Exercise the writer
+# directly against a completed run's status.json.
+test_heartbeat_never_overwrites_terminal_state() {
+  local log_dir="$TEST_TMP/logs-hbterm"
+  mkdir -p "$log_dir"
+  local stdout handle base
+  stdout=$(launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  handle=$(parse_handle "$stdout")
+  wait_for_state "$log_dir" "$handle" "complete" "terminal-guard run completes" >/dev/null
+  base=$(tr -d '\n' < "$log_dir/.locator.$handle")
+  local fn
+  fn=$(sed -n '/^touch_heartbeat()/,/^}/p' "$RUNNER")
+  [[ -n "$fn" ]] || fail "touch_heartbeat not found in runner"
+  local before after
+  before=$(cat "$base.status.json")
+  bash -c "STATUS_FILE='$base.status.json'; $fn; touch_heartbeat"
+  after=$(cat "$base.status.json")
+  [[ "$before" == "$after" ]] || fail "touch_heartbeat wrote over a terminal state:
+before: $before
+after:  $after"
+}
+
 make_fake_claude
 test_plain_launch_trackers_and_completion
 test_monitor_mode_launch_handle_still_resolves
 test_mint_handle_suffix_always_has_hex_letter
+test_heartbeat_advances
+test_heartbeat_never_overwrites_terminal_state
 
 printf 'fresheyes-detach tests passed\n'

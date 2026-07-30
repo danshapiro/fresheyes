@@ -391,6 +391,9 @@ PY
 
 _cleanup() {
   local status=$?
+  # Stop the heartbeat BEFORE any terminal write: a beat racing the terminal
+  # write_status could re-commit a stale non-terminal record over it.
+  _stop_heartbeat
   if [[ "${FINAL_STATUS_WRITTEN:-0}" != "1" ]]; then
     if [[ "$status" -eq 0 ]]; then
       write_status "complete" "$status" "$(manual_verdict_from_log 2>/dev/null || true)" || true
@@ -399,10 +402,6 @@ _cleanup() {
     fi
   fi
   rm -f "$LOG_DIR/.active.$HANDLE"
-  if [[ -n "${HEARTBEAT_PID:-}" ]]; then
-    kill "$HEARTBEAT_PID" 2>/dev/null || true
-    wait "$HEARTBEAT_PID" 2>/dev/null || true
-  fi
 }
 trap _cleanup EXIT
 
@@ -549,13 +548,41 @@ run_claude_automatic() {
   log_event "info" "provider_finished" "Claude automatic review finished."
 }
 
-# --- Heartbeat ---
-# Keeps the harness from killing this process during long, silent reviews.
+# Liveness heartbeat: touch status.json's heartbeat_at every ~20s so the
+# progress script can distinguish a live review from a dead one. Replaces
+# the old 300s stderr echo, which was invisible when detached.
+touch_heartbeat() {
+  python3 - "$STATUS_FILE" <<'PY' || true
+import json, os, sys, time
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as handle:
+        record = json.load(handle)
+except Exception:
+    record = {}
+# Terminal-state precedence: `kill $HEARTBEAT_PID` covers only the subshell —
+# an already-forked python can commit a whole stale record AFTER the terminal
+# write, resurrecting state=running (later misread as died). Never write over
+# a terminal state.
+if record.get("state") in ("complete", "failed"):
+    sys.exit(0)
+record["heartbeat_at"] = time.time()
+tmp_path = f"{path}.tmp.hb.{os.getpid()}"
+with open(tmp_path, "w", encoding="utf-8") as handle:
+    json.dump(record, handle)
+os.replace(tmp_path, path)
+PY
+}
+
 _start_heartbeat() {
   (
     while true; do
-      sleep 300 >/dev/null 2>/dev/null
-      echo "Fresh Eyes [$$]: review in progress..." >&2
+      sleep "${FRESHEYES_HEARTBEAT_SECS:-20}"
+      # Self-terminate when the owner is gone: a SIGKILLed owner never runs
+      # _stop_heartbeat, and an orphan loop beating status.json forever would
+      # mask `died` permanently.
+      kill -0 "${OWNER_PID:-$$}" 2>/dev/null || exit 0
+      touch_heartbeat
     done
   ) &
   HEARTBEAT_PID=$!
@@ -565,6 +592,7 @@ _stop_heartbeat() {
   if [[ -n "${HEARTBEAT_PID:-}" ]]; then
     kill "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true
+    HEARTBEAT_PID=""
   fi
 }
 
@@ -645,6 +673,7 @@ sys.exit(1)
 PY
   status=$?
   set -e
+  _stop_heartbeat
   if [[ "$status" -eq 0 ]]; then
     write_status "complete" "$status" "approved"
   else
@@ -664,6 +693,7 @@ case "$PROVIDER" in
   claude) run_claude_manual ;;
 esac
 
+_stop_heartbeat
 write_status "complete" "0" "$(manual_verdict_from_log 2>/dev/null || true)"
 FINAL_STATUS_WRITTEN="1"
 
