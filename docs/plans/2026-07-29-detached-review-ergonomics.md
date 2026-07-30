@@ -1986,11 +1986,17 @@ echo "e2e tmp: $E2E_TMP"
 
 cat > "$FAKE_BIN/claude" <<'FAKE'
 #!/usr/bin/env python3
-import json, os, sys
+import json, os, sys, time
 if "--version" in sys.argv:
     print(os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION", "2.1.170 (Claude Code)"))
     sys.exit(0)
+# FRESHEYES_FAKE_DELAY (seconds) stretches the review; both cells below set
+# it to 30 and their assertions DEPEND on the review still being in flight
+# when codex exec returns. Sleep AFTER the init event, BEFORE the result.
+delay = float(os.environ.get("FRESHEYES_FAKE_DELAY", "0"))
 print(json.dumps({"type": "system", "subtype": "init"}), flush=True)
+if delay:
+    time.sleep(delay)
 review = "# Review\n\nAll good.\n\nINDEPENDENT CODE REVIEW PASSED\n"
 print(json.dumps({"type": "result", "subtype": "success", "result": review}), flush=True)
 FAKE
