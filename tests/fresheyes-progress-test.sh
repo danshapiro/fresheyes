@@ -312,18 +312,26 @@ The provider failed after inspecting a fixture containing:
 - fixture.md
 INDEPENDENT CODE REVIEW PASSED
 TEXT
-  printf '%s\n' '{"state":"failed","provider":"gpt","mode":"manual","exit_code":1}' > "$base.status.json"
+  # The real runner stamps heartbeat_at on the terminal "failed" write too:
+  # a FRESH heartbeat must not mask the recorded failure as "running".
+  printf '{"state":"failed","provider":"gpt","mode":"manual","exit_code":1,"heartbeat_at":%s}\n' \
+    "$(date +%s)" > "$base.status.json"
 
+  set +e
   output=$(run_progress --json "$pid")
-  assert_json_field_equals "$output" "state" "failed" "failed status incidental verdict JSON state"
+  status=$?
+  set -e
+  assert_equals "$status" "4" "failed status incidental verdict JSON exit code"
+  assert_json_field_equals "$output" "state" "died" "failed status incidental verdict JSON state"
   assert_json_field_equals "$output" "runner_state" "failed" "failed status incidental verdict runner state"
   assert_json_field_equals "$output" "result_available" "false" "failed status incidental verdict result availability"
+  assert_contains "$(json_field "$output" "message")" "exit_code=1" "died message quotes recorded exit code"
 
   set +e
   result=$(run_progress --result "$pid")
   status=$?
   set -e
-  assert_equals "$status" "1" "failed status incidental verdict result status"
+  assert_equals "$status" "4" "failed status incidental verdict result status"
   assert_contains "$result" "Fresh Eyes review failed before final output" "failed status incidental verdict result"
 }
 
@@ -421,8 +429,13 @@ test_global_locator_ignores_external_log_by_default() {
 INDEPENDENT CODE REVIEW PASSED
 TEXT
 
+  local status
+  set +e
   output=$(run_progress --json "$pid")
-  assert_json_field_equals "$output" "state" "missing" "global locator external log default state"
+  status=$?
+  set -e
+  assert_equals "$status" "5" "global locator external log default exit code"
+  assert_json_field_equals "$output" "state" "unknown_handle" "global locator external log default state"
 
   output=$(run_progress_allow_legacy --result "$pid")
   assert_contains "$output" "## Files Examined" "global locator legacy override"
@@ -475,8 +488,8 @@ test_parent_alias_no_longer_resolves() {
   output=$(run_progress --json "$dead_pid" || true)
   local state
   state=$(json_field "$output" "state")
-  if [[ "$state" != "missing" && "$state" != "unknown_handle" ]]; then
-    fail "expected unresolved state for .parent-only tracker, got: $state"
+  if [[ "$state" != "unknown_handle" ]]; then
+    fail "expected unknown_handle for .parent-only tracker, got: $state"
   fi
 }
 

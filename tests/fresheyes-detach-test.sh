@@ -86,6 +86,8 @@ poll_json() {
   TMPDIR="$TEST_TMP" \
   FRESHEYES_LOG_DIR="$log_dir" \
   FRESHEYES_GLOBAL_LOG_DIR="$log_dir" \
+  FRESHEYES_LAUNCH_GRACE_SECS="${FRESHEYES_LAUNCH_GRACE_SECS:-15}" \
+  FRESHEYES_HEARTBEAT_STALE_SECS="${FRESHEYES_HEARTBEAT_STALE_SECS:-60}" \
   timeout 30s bash "$PROGRESS" --json "$handle"
 }
 
@@ -233,11 +235,187 @@ before: $before
 after:  $after"
 }
 
+# --- (c) killed at launch: a fake setsid that launches NOTHING simulates the
+# harness killing the child before its first write (parent-side artifacts
+# only), exactly like the codex exec field failure.
+make_noop_setsid() {
+  cat > "$FAKE_BIN/setsid" <<'FAKE'
+#!/usr/bin/env bash
+# Swallow the child: simulates the harness tree-kill landing before the
+# child's first write. Consumes stdin/stdout silently.
+exit 0
+FAKE
+  chmod +x "$FAKE_BIN/setsid"
+}
+
+make_crashing_setsid() {
+  cat > "$FAKE_BIN/setsid" <<'FAKE'
+#!/usr/bin/env bash
+echo "boom: provider exploded during startup" >&2
+exit 1
+FAKE
+  chmod +x "$FAKE_BIN/setsid"
+}
+
+remove_fake_setsid() {
+  rm -f "$FAKE_BIN/setsid"
+}
+
+test_killed_at_launch_harness_variant() {
+  local log_dir="$TEST_TMP/logs-c1"
+  mkdir -p "$log_dir"
+  make_noop_setsid
+  local stdout
+  stdout=$(launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  local handle
+  handle=$(parse_handle "$stdout")
+
+  sleep 2  # exceed the (overridden) launch grace
+  # Removed only AFTER the settle sleep: removing immediately races the
+  # backgrounded child's exec of setsid, and a lost race writes a shell
+  # "No such file or directory" error into launch.stderr, turning the
+  # harness-kill (empty stderr) variant into the crashed variant.
+  remove_fake_setsid
+  local output rc
+  set +e
+  output=$(FRESHEYES_LAUNCH_GRACE_SECS=1 poll_json "$log_dir" "$handle")
+  rc=$?
+  set -e
+  [[ "$rc" -eq 3 ]] || fail "killed_at_launch exit code: got $rc, want 3"
+  [[ "$(json_field "$output" "state")" == "killed_at_launch" ]] || fail "state: $output"
+  local message
+  message=$(json_field "$output" "message")
+  assert_contains "$message" "never wrote its first heartbeat" "killed_at_launch observation"
+  assert_contains "$message" "kills or reaps detached processes" "killed_at_launch likely cause (hedged)"
+  assert_contains "$message" "--foreground" "killed_at_launch remediation"
+}
+
+test_killed_at_launch_crashed_variant() {
+  local log_dir="$TEST_TMP/logs-c2"
+  mkdir -p "$log_dir"
+  make_crashing_setsid
+  local stdout
+  stdout=$(launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  local handle
+  handle=$(parse_handle "$stdout")
+
+  sleep 2
+  remove_fake_setsid  # after settle: see harness-variant race note
+  local output rc
+  set +e
+  output=$(FRESHEYES_LAUNCH_GRACE_SECS=1 poll_json "$log_dir" "$handle")
+  rc=$?
+  set -e
+  [[ "$rc" -eq 3 ]] || fail "crashed-at-launch exit code: got $rc, want 3"
+  [[ "$(json_field "$output" "state")" == "killed_at_launch" ]] || fail "state: $output"
+  local message
+  message=$(json_field "$output" "message")
+  assert_contains "$message" "crashed" "crashed variant names the crash"
+  assert_contains "$message" "launch.stderr" "crashed variant points at stderr file"
+}
+
+# --- (d) died mid-review: kill the whole review session, heartbeat goes stale.
+test_died_midreview() {
+  local log_dir="$TEST_TMP/logs-d"
+  mkdir -p "$log_dir"
+  local stdout
+  stdout=$(FRESHEYES_HEARTBEAT_SECS=1 FRESHEYES_FAKE_DELAY=20 \
+    launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  local handle
+  handle=$(parse_handle "$stdout")
+  local output
+  output=$(wait_for_state "$log_dir" "$handle" "running" "died-test reaches running")
+  local owner_pid
+  owner_pid=$(json_field "$output" "owner_pid")
+  [[ "$owner_pid" =~ ^[0-9]+$ ]] || fail "no owner_pid while running: $output"
+  # Kill the whole detached session (child + heartbeat + provider).
+  pkill -9 -s "$owner_pid" 2>/dev/null || kill -9 "$owner_pid" 2>/dev/null || true
+  sleep 3   # > 2x the 1s heartbeat; we poll with a 2s staleness override
+
+  local rc
+  set +e
+  output=$(FRESHEYES_HEARTBEAT_STALE_SECS=2 poll_json "$log_dir" "$handle")
+  rc=$?
+  set -e
+  [[ "$rc" -eq 4 ]] || fail "died exit code: got $rc, want 4 (output: $output)"
+  [[ "$(json_field "$output" "state")" == "died" ]] || fail "state: $output"
+  local message log_path
+  message=$(json_field "$output" "message")
+  log_path=$(json_field "$output" "log_path")
+  assert_contains "$message" "$log_path" "died message leads with log path"
+  assert_contains "$message" "--foreground" "died message offers foreground re-run"
+  assert_contains "$message" "Last sign of life" "died message includes time of death"
+}
+
+# --- (e) unknown handle
+test_unknown_handle() {
+  local log_dir="$TEST_TMP/logs-e"
+  mkdir -p "$log_dir"
+  local output rc
+  set +e
+  output=$(poll_json "$log_dir" "20990101-000000-deadbe")
+  rc=$?
+  set -e
+  [[ "$rc" -eq 5 ]] || fail "unknown_handle exit code: got $rc, want 5"
+  [[ "$(json_field "$output" "state")" == "unknown_handle" ]] || fail "state: $output"
+  local message
+  message=$(json_field "$output" "message")
+  assert_contains "$message" "no tracker for this handle" "unknown_handle observation"
+  assert_contains "$message" "trackers were removed" "unknown_handle hedged cause"
+}
+
+# --- launching state right after a (stalled) launch
+test_launching_state_is_calm() {
+  local log_dir="$TEST_TMP/logs-l"
+  mkdir -p "$log_dir"
+  make_noop_setsid
+  local stdout
+  stdout=$(launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  local handle
+  handle=$(parse_handle "$stdout")
+  # Within the 15s default grace: launching, exit 0, calm message.
+  local output
+  output=$(poll_json "$log_dir" "$handle") || fail "launching poll must exit 0"
+  remove_fake_setsid  # after poll: see harness-variant race note
+  [[ "$(json_field "$output" "state")" == "launching" ]] || fail "state: $output"
+  assert_contains "$(json_field "$output" "message")" "poll again in ~15s" "launching message"
+}
+
+# --- (f) progress never writes, across every state
+test_progress_read_only_all_states() {
+  for dir in "$TEST_TMP"/logs-*; do
+    [[ -d "$dir" ]] || continue
+    local before after
+    before=$(snapshot_dir "$dir")
+    for locator in "$dir"/.locator.*; do
+      [[ -e "$locator" ]] || continue
+      local handle="${locator##*/.locator.}"
+      FRESHEYES_LAUNCH_GRACE_SECS=1 FRESHEYES_HEARTBEAT_STALE_SECS=2 \
+        poll_json "$dir" "$handle" >/dev/null 2>&1 || true
+      TMPDIR="$TEST_TMP" FRESHEYES_LOG_DIR="$dir" FRESHEYES_GLOBAL_LOG_DIR="$dir" \
+        timeout 30s bash "$PROGRESS" --result "$handle" >/dev/null 2>&1 || true
+    done
+    poll_json "$dir" "20990101-000000-deadbe" >/dev/null 2>&1 || true
+    after=$(snapshot_dir "$dir")
+    [[ "$before" == "$after" ]] || fail "progress mutated $dir:
+--- before ---
+$before
+--- after ---
+$after"
+  done
+}
+
 make_fake_claude
 test_plain_launch_trackers_and_completion
 test_monitor_mode_launch_handle_still_resolves
 test_mint_handle_suffix_always_has_hex_letter
 test_heartbeat_advances
 test_heartbeat_never_overwrites_terminal_state
+test_killed_at_launch_harness_variant
+test_killed_at_launch_crashed_variant
+test_died_midreview
+test_unknown_handle
+test_launching_state_is_calm
+test_progress_read_only_all_states
 
 printf 'fresheyes-detach tests passed\n'

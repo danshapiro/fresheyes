@@ -98,6 +98,35 @@ _owner_pid_for_base() {
   printf '%s\n' "$owner"
 }
 
+# Message discipline for failure states: observation + likely cause +
+# certain action, conditioned on captured evidence.
+_killed_at_launch_message() {
+  local base="$1"
+  local launch_stderr="$base.launch.stderr"
+  if [[ -s "$launch_stderr" ]]; then
+    printf 'the review child crashed during launch — it wrote errors before dying (see %s; last lines: %s). Re-run the same command with --foreground to see the failure directly.' \
+      "$launch_stderr" \
+      "$(tail -n 3 "$launch_stderr" | tr '\n' ' ' | cut -c1-300)"
+  else
+    printf 'the review child never wrote its first heartbeat — commonly because the calling harness kills or reaps detached processes when the launch command exits; re-run the same command with --foreground (works regardless of cause)'
+  fi
+}
+
+_died_message() {
+  local base="$1"
+  local died_epoch="${HEARTBEAT_AT:-$LAUNCHED_AT}"
+  local died_human="unknown"
+  if [[ -n "$died_epoch" ]]; then
+    died_human=$(date -d "@${died_epoch%.*}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '%s' "$died_epoch")
+  fi
+  local recorded=""
+  if [[ "$STATUS_STATE" == "failed" ]]; then
+    recorded=" The runner recorded state=failed${STATUS_EXIT_CODE:+ (exit_code=$STATUS_EXIT_CODE)}."
+  fi
+  printf 'review died before producing a verdict — inspect the log at %s for evidence.%s Last sign of life: %s. To retry synchronously, re-run the same command with --foreground.' \
+    "$base" "$recorded" "$died_human"
+}
+
 _process_state() {
   local pid="$1"
   local stat
@@ -225,25 +254,6 @@ _find_base_for_pid() {
   return 1
 }
 
-_review_is_running() {
-  local requested_pid="$1"
-  local base="$2"
-  local owner_pid
-
-  if [[ $(_process_state "$requested_pid") == "active" ]]; then
-    return 0
-  fi
-
-  owner_pid=$(_owner_pid_for_base "$base" 2>/dev/null || true)
-  if [[ -n "$owner_pid" && "$owner_pid" != "$requested_pid" ]]; then
-    if [[ $(_process_state "$owner_pid") == "active" ]]; then
-      return 0
-    fi
-  fi
-
-  return 1
-}
-
 _find_legacy_base() {
   local active_file="$LOG_DIR/.active"
   if [[ ! -f "$active_file" ]]; then
@@ -266,15 +276,6 @@ line_count_or_zero() {
   else
     printf '0\n'
   fi
-}
-
-cat_if_nonempty() {
-  local base="$1"
-  if [[ -s "$base" ]]; then
-    cat "$base"
-    return 0
-  fi
-  return 1
 }
 
 detect_manual_verdict() {
@@ -387,6 +388,7 @@ from pathlib import Path
 state, base_arg, requested_pid, owner_pid, requested_pid_state, owner_pid_state, verdict, message = sys.argv[1:9]
 
 record = {"state": state}
+record["handle"] = requested_pid
 if message:
     record["message"] = message
 if requested_pid:
@@ -458,7 +460,16 @@ if base is not None:
         except OSError:
             pass
 
-for key in ("provider", "mode", "exit_code", "updated_at_epoch"):
+for key in (
+    "provider",
+    "mode",
+    "exit_code",
+    "updated_at_epoch",
+    "detach_method",
+    "heartbeat_at",
+    "launched_at",
+    "owner_pid",
+):
     if key in status_data and key not in record:
         record[key] = status_data[key]
 
@@ -614,10 +625,6 @@ print_result_or_pending() {
       print_failure_diagnostic "$base"
       return 1
       ;;
-    failed)
-      print_failure_diagnostic "$base"
-      return 1
-      ;;
     *)
       printf 'Fresh Eyes review is not complete yet. Poll with --json for current status.\n'
       return 1
@@ -628,30 +635,36 @@ print_result_or_pending() {
 if [[ -n "$PID" ]]; then
   LOG_FILE=$(_find_base_for_pid "$PID" || true)
   if [[ -z "$LOG_FILE" ]]; then
+    UNKNOWN_MSG="no tracker for this handle in $LOG_DIR"
+    if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
+      UNKNOWN_MSG="$UNKNOWN_MSG or $GLOBAL_LOG_DIR"
+    fi
+    UNKNOWN_MSG="$UNKNOWN_MSG — the handle is wrong, or its trackers were removed (e.g. /tmp cleanup)"
     if [[ "$OUTPUT_MODE" == "json" ]]; then
-      print_json_status "missing" "" "$PID" "" "$(_process_state "$PID")" "" "" "no tracked Fresh Eyes output found"
-      exit 0
+      print_json_status "unknown_handle" "" "$PID" "" "$(_process_state "$PID")" "" "" "$UNKNOWN_MSG"
+      exit 5
     fi
     if [[ "$OUTPUT_MODE" == "result" ]]; then
-      printf 'Fresh Eyes review output is not available.\n'
-      exit 1
+      printf '%s\n' "$UNKNOWN_MSG"
+      exit 5
     fi
-    echo "0"
-    exit 0
+    printf '%s\n' "$UNKNOWN_MSG"
+    exit 5
   fi
 else
   LOG_FILE=$(_find_legacy_base || true)
   if [[ -z "$LOG_FILE" ]]; then
+    UNKNOWN_MSG="no active Fresh Eyes review found in $LOG_DIR — the handle is wrong, or its trackers were removed (e.g. /tmp cleanup)"
     if [[ "$OUTPUT_MODE" == "json" ]]; then
-      print_json_status "missing" "" "" "" "" "" "" "no active Fresh Eyes review found"
-      exit 0
+      print_json_status "unknown_handle" "" "" "" "" "" "" "$UNKNOWN_MSG"
+      exit 5
     fi
     if [[ "$OUTPUT_MODE" == "result" ]]; then
-      printf 'Fresh Eyes review output is not available.\n'
-      exit 1
+      printf '%s\n' "$UNKNOWN_MSG"
+      exit 5
     fi
-    echo "0"
-    exit 0
+    printf '%s\n' "$UNKNOWN_MSG"
+    exit 5
   fi
 fi
 
@@ -664,11 +677,33 @@ fi
 
 STATUS_STATE=$(status_file_field "$LOG_FILE" "state" 2>/dev/null || true)
 STATUS_VERDICT=$(status_file_field "$LOG_FILE" "verdict" 2>/dev/null || true)
+STATUS_EXIT_CODE=$(status_file_field "$LOG_FILE" "exit_code" 2>/dev/null || true)
+HEARTBEAT_AT=$(status_file_field "$LOG_FILE" "heartbeat_at" 2>/dev/null || true)
+LAUNCHED_AT=$(status_file_field "$LOG_FILE" "launched_at" 2>/dev/null || true)
+NOW_EPOCH=$(date +%s)
+STALE_SECS="${FRESHEYES_HEARTBEAT_STALE_SECS:-60}"
+LAUNCH_GRACE_SECS="${FRESHEYES_LAUNCH_GRACE_SECS:-15}"
+
+_owner_alive() {
+  [[ -n "$OWNER_PID" ]] || return 1
+  [[ "$(_process_state "$OWNER_PID")" == "active" ]]
+}
+
+_epoch_within() {
+  # _epoch_within <epoch> <window_secs> : true when now - epoch < window
+  local epoch="$1" window="$2"
+  [[ -n "$epoch" ]] || return 1
+  python3 - "$epoch" "$NOW_EPOCH" "$window" <<'PY'
+import sys
+epoch, now, window = (float(a) for a in sys.argv[1:4])
+sys.exit(0 if now - epoch < window else 1)
+PY
+}
+
+# Verdict extraction: status.json wins over raw-log regex (Codex logs can
+# contain verdict-shaped examples).
+VERDICT=""
 if [[ -n "$STATUS_STATE" ]]; then
-  # Codex logs include inspected source and command output, which can contain
-  # verdict examples. A runner status file is authoritative whenever present;
-  # raw-log detection is only for legacy runs without structured status.
-  VERDICT=""
   if [[ "$STATUS_STATE" == "complete" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
     VERDICT="$STATUS_VERDICT"
   fi
@@ -676,26 +711,55 @@ else
   VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
 fi
 
-if [[ "$STATUS_STATE" == "complete" ]]; then
+MESSAGE=""
+STATE_EXIT_CODE=0
+if [[ "$STATUS_STATE" == "complete" || -n "$VERDICT" ]]; then
   REVIEW_STATE="complete"
+elif [[ "$STATUS_STATE" == "launching" ]]; then
+  if _owner_alive || _epoch_within "$LAUNCHED_AT" "$LAUNCH_GRACE_SECS"; then
+    REVIEW_STATE="launching"
+    MESSAGE="review starting — poll again in ~15s"
+  else
+    REVIEW_STATE="killed_at_launch"
+    STATE_EXIT_CODE=3
+    MESSAGE=$(_killed_at_launch_message "$LOG_FILE")
+  fi
 elif [[ "$STATUS_STATE" == "failed" ]]; then
-  REVIEW_STATE="failed"
-elif [[ -n "$VERDICT" ]]; then
-  REVIEW_STATE="complete"
-elif [[ -n "$PID" ]] && _review_is_running "$PID" "$LOG_FILE"; then
+  # Terminal child-recorded failure: report immediately. This branch MUST
+  # precede the heartbeat-freshness check — the runner stamps heartbeat_at
+  # on the terminal "failed" write too, so freshness-first would mask a
+  # recorded failure as healthy "running" for up to STALE_SECS.
+  REVIEW_STATE="died"
+  STATE_EXIT_CODE=4
+  MESSAGE=$(_died_message "$LOG_FILE")
+elif _epoch_within "$HEARTBEAT_AT" "$STALE_SECS" || _owner_alive; then
   REVIEW_STATE="running"
-elif [[ -n "$PID" ]]; then
-  REVIEW_STATE="failed"
+elif [[ -z "$STATUS_STATE" && ! -s "$LOG_FILE" && -n "$PID" ]] && ! _owner_alive; then
+  # Resolvable handle but nothing was ever written and nobody is alive:
+  # the child never started (e.g. killed between the parent's two writes).
+  REVIEW_STATE="killed_at_launch"
+  STATE_EXIT_CODE=3
+  MESSAGE=$(_killed_at_launch_message "$LOG_FILE")
+elif [[ -z "$PID" ]]; then
+  # Legacy no-handle invocation has no liveness signal; preserve old default.
+  REVIEW_STATE="running"
 else
-  REVIEW_STATE="running"
+  REVIEW_STATE="died"
+  STATE_EXIT_CODE=4
+  MESSAGE=$(_died_message "$LOG_FILE")
 fi
 
 if [[ "$OUTPUT_MODE" == "json" ]]; then
-  print_json_status "$REVIEW_STATE" "$LOG_FILE" "$PID" "$OWNER_PID" "$REQUESTED_PID_STATE" "$OWNER_PID_STATE" "$VERDICT"
-  exit 0
+  print_json_status "$REVIEW_STATE" "$LOG_FILE" "$PID" "$OWNER_PID" "$REQUESTED_PID_STATE" "$OWNER_PID_STATE" "$VERDICT" "$MESSAGE"
+  exit "$STATE_EXIT_CODE"
 fi
 
 if [[ "$OUTPUT_MODE" == "result" ]]; then
+  if [[ "$REVIEW_STATE" == "killed_at_launch" || "$REVIEW_STATE" == "died" ]]; then
+    printf '%s\n' "$MESSAGE"
+    print_failure_diagnostic "$LOG_FILE"
+    exit "$STATE_EXIT_CODE"
+  fi
   print_result_or_pending "$REVIEW_STATE" "$LOG_FILE"
   exit $?
 fi
@@ -708,11 +772,14 @@ if [[ "$REVIEW_STATE" == "complete" ]]; then
   exit 0
 fi
 
-if [[ "$REVIEW_STATE" == "failed" && -n "$PID" ]]; then
-  if cat_if_nonempty "$LOG_FILE"; then
-    exit 0
-  fi
+if [[ "$REVIEW_STATE" == "killed_at_launch" || "$REVIEW_STATE" == "died" ]]; then
+  printf '%s\n' "$MESSAGE"
   print_failure_diagnostic "$LOG_FILE"
+  exit "$STATE_EXIT_CODE"
+fi
+
+if [[ "$REVIEW_STATE" == "launching" ]]; then
+  printf '%s\n' "$MESSAGE"
   exit 0
 fi
 
