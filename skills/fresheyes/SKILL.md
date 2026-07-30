@@ -82,7 +82,7 @@ Poll with the exact command from the receipt's `NEXT:` line:
 bash "<base-directory>/fresheyes-progress.sh" --json <handle>
 ```
 
-Do not call `fresheyes-progress.sh <handle>` without `--json` or `--result`; bare handle polling is intentionally rejected because stale legacy progress can look like current output.
+Do not call `fresheyes-progress.sh <handle>` without `--json` or `--result`; bare handle polling is intentionally rejected (usage errors exit 2) because stale legacy progress can look like current output.
 
 Each poll returns one JSON line. The `state` field and the command's exit code tell you everything:
 
