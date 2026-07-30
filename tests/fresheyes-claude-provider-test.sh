@@ -321,45 +321,6 @@ test_parser_missing_result_writes_failure_log() {
   assert_contains "$output" "Fresh Eyes review failed before final output" "parser failure stdout"
 }
 
-test_compound_launch_parent_pid_recovers_review() {
-  local run_tmp stdout_file captured_pid progress_output status
-  run_tmp="$(mktemp -d "$TEST_TMP/compound.XXXXXX")"
-  stdout_file="$run_tmp/stdout.txt"
-  rm -f "$ARGV_FILE"
-
-  captured_pid=$(
-    TMPDIR="$run_tmp" \
-    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
-    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
-    PATH="$FAKE_BIN:$PATH" \
-    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
-    timeout 30s bash -c \
-      'true && setsid bash "$1" --foreground --claude "Review README.md." </dev/null > "$2" 2>/dev/null & echo "$!"' \
-      bash "$RUNNER" "$stdout_file"
-  )
-
-  [[ "$captured_pid" =~ ^[0-9]+$ ]] || fail "compound launch did not return a pid: $captured_pid"
-  for _ in {1..50}; do
-    set +e
-    progress_output=$(
-      TMPDIR="$run_tmp" \
-      FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
-      FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
-      bash "$PROGRESS_SCRIPT" --result "$captured_pid" 2>/dev/null
-    )
-    status=$?
-    set -e
-    if [[ "$status" -eq 0 && "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
-      assert_contains "$progress_output" "- README.md" "detached Claude result preserves the first files list"
-      return 0
-    fi
-    sleep 0.1
-  done
-
-  printf 'Compound launch progress never returned final review. pid=%s output:\n%s\n' "$captured_pid" "$progress_output" >&2
-  exit 1
-}
-
 test_manual_detaches_by_default_and_completes() {
   local run_tmp stdout_file fresh_pid progress_output status self_sid child_sid
   run_tmp="$(mktemp -d "$TEST_TMP/detach.XXXXXX")"
@@ -518,7 +479,6 @@ test_manual_claude_invocation_uses_streaming_flags
 test_automatic_claude_extracts_structured_output
 test_default_log_dir_uses_global_log_dir
 test_parser_missing_result_writes_failure_log
-test_compound_launch_parent_pid_recovers_review
 test_manual_detaches_by_default_and_completes
 test_manual_foreground_runs_synchronously
 test_automatic_mode_does_not_detach

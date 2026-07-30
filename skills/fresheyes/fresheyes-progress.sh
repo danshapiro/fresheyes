@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # fresheyes-progress.sh - Check Fresh Eyes review status or result.
-# Usage: fresheyes-progress.sh [--json|--result] [PID]
+# Usage: fresheyes-progress.sh [--json|--result] [HANDLE]
 #
-# Without PID: returns the line count of the legacy .active review (backward compat).
-# With PID:    requires --json or --result by default. Bare PID output is disabled
-#              because it is easy to mistake stale or truncated legacy logs for
-#              current progress.
+# HANDLE is an opaque review handle: the FRESHPID= receipt value printed at
+# launch (historically a pid, now an opaque key). It resolves through the
+# .locator.<handle>/.active.<handle> tracker files. This script is strictly
+# read-only: it never writes, touches, or removes anything on disk.
+#
+# Without HANDLE: returns the line count of the legacy .active review (backward compat).
+# With HANDLE:   requires --json or --result by default. Bare handle output is
+#                disabled because it is easy to mistake stale or truncated
+#                legacy logs for current progress.
 # With --json: returns compact machine-readable status for polling.
 # With --result: returns final review text only after completion.
 
@@ -74,11 +79,30 @@ _pid_from_base() {
   return 1
 }
 
+# Owner pid of a run: status.json owner_pid (new), then status.json pid
+# (legacy), then the legacy numeric filename suffix. Prints nothing and
+# returns 1 when no owner is recorded.
+_owner_pid_for_base() {
+  local base="$1"
+  local owner=""
+  owner=$(status_file_field "$base" "owner_pid" 2>/dev/null || true)
+  if [[ -z "$owner" ]]; then
+    owner=$(status_file_field "$base" "pid" 2>/dev/null || true)
+  fi
+  if [[ -z "$owner" ]]; then
+    owner=$(_pid_from_base "$base" 2>/dev/null || true)
+  fi
+  if [[ -z "$owner" || ! "$owner" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  printf '%s\n' "$owner"
+}
+
 _process_state() {
   local pid="$1"
   local stat
 
-  if [[ -z "$pid" ]]; then
+  if [[ -z "$pid" || ! "$pid" =~ ^[0-9]+$ ]]; then
     printf 'unknown\n'
     return 0
   fi
@@ -158,17 +182,6 @@ _find_base_for_pid_in_dir() {
     fi
   done
 
-  if [[ $(_process_state "$pid") != "active" ]]; then
-    tracker_file="$dir/.parent.$pid"
-    if tracked_path=$(_tracker_path "$tracker_file"); then
-      if ! _tracker_target_allowed "$dir" "$tracked_path"; then
-        return 1
-      fi
-      printf '%s\n' "$tracked_path"
-      return 0
-    fi
-  fi
-
   shopt -s nullglob
   matches=(
     "$dir"/fresheyes-*-"$pid".log
@@ -221,7 +234,7 @@ _review_is_running() {
     return 0
   fi
 
-  owner_pid=$(_pid_from_base "$base" 2>/dev/null || true)
+  owner_pid=$(_owner_pid_for_base "$base" 2>/dev/null || true)
   if [[ -n "$owner_pid" && "$owner_pid" != "$requested_pid" ]]; then
     if [[ $(_process_state "$owner_pid") == "active" ]]; then
       return 0
@@ -642,7 +655,7 @@ else
   fi
 fi
 
-OWNER_PID=$(_pid_from_base "$LOG_FILE" 2>/dev/null || true)
+OWNER_PID=$(_owner_pid_for_base "$LOG_FILE" 2>/dev/null || true)
 REQUESTED_PID_STATE=$(_process_state "$PID")
 OWNER_PID_STATE=""
 if [[ -n "$OWNER_PID" && "$OWNER_PID" != "$PID" ]]; then
@@ -696,7 +709,6 @@ if [[ "$REVIEW_STATE" == "complete" ]]; then
 fi
 
 if [[ "$REVIEW_STATE" == "failed" && -n "$PID" ]]; then
-  rm -f "$LOG_DIR/.active.$PID"
   if cat_if_nonempty "$LOG_FILE"; then
     exit 0
   fi

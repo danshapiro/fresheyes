@@ -135,12 +135,9 @@ write_locator_alias() {
   printf '%s\n' "$base" > "$dir/.locator.$pid"
 }
 
-write_parent_alias() {
-  local parent_pid="$1"
-  local base="$2"
-  local dir="${3:-$LOG_DIR}"
-  mkdir -p "$dir"
-  printf '%s\n' "$base" > "$dir/.parent.$parent_pid"
+snapshot_dir() {
+  # Stable fingerprint of every file's path, size, and mtime under a dir.
+  find "$1" -mindepth 1 -printf '%p %s %T@\n' 2>/dev/null | sort
 }
 
 write_claude_events() {
@@ -409,63 +406,6 @@ JSON
   assert_contains "$output" "schema output was empty" "dead empty log diagnostics"
 }
 
-test_dead_launcher_alias_to_live_owner_reports_running() {
-  local parent_pid owner_pid base output
-  dead_pid parent_pid
-  start_live_pid owner_pid
-  base="$LOG_DIR/fresheyes-test-$owner_pid.log"
-  write_parent_alias "$parent_pid" "$base"
-  write_claude_events "$base"
-
-  output=$(run_progress --json "$parent_pid")
-  assert_json_field_equals "$output" "state" "running" "dead launcher alias live owner JSON state"
-  assert_json_field_equals "$output" "provider" "claude" "dead launcher alias live owner JSON provider"
-  assert_json_field_equals "$output" "line_count" "0" "dead launcher alias live owner JSON line count"
-}
-
-test_dead_launcher_alias_to_finished_owner_returns_review() {
-  local parent_pid owner_pid base output
-  dead_pid parent_pid
-  dead_pid owner_pid
-  base="$LOG_DIR/fresheyes-test-$owner_pid.log"
-  write_parent_alias "$parent_pid" "$base"
-  cat > "$base" <<'TEXT'
-## Files Examined
-
-- README.md
-
-INDEPENDENT CODE REVIEW FAILED
-TEXT
-
-  output=$(run_progress --result "$parent_pid")
-  assert_contains "$output" "## Files Examined" "dead launcher alias finished owner"
-  assert_contains "$output" "INDEPENDENT CODE REVIEW FAILED" "dead launcher alias finished owner"
-}
-
-test_global_parent_alias_ignores_external_log_by_default() {
-  local parent_pid owner_pid alt_log_dir base output
-  dead_pid parent_pid
-  dead_pid owner_pid
-  alt_log_dir="$TEST_TMP/alternate-tmp/fresheyes-logs"
-  base="$alt_log_dir/fresheyes-test-$owner_pid.log"
-  write_parent_alias "$parent_pid" "$base" "$GLOBAL_LOG_DIR"
-  mkdir -p "$alt_log_dir"
-  cat > "$base" <<'TEXT'
-## Files Examined
-
-- README.md
-
-INDEPENDENT CODE REVIEW PASSED
-TEXT
-
-  output=$(run_progress --json "$parent_pid")
-  assert_json_field_equals "$output" "state" "missing" "global parent alias external log default state"
-
-  output=$(run_progress_allow_legacy --result "$parent_pid")
-  assert_contains "$output" "## Files Examined" "global parent alias legacy override"
-  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global parent alias legacy override"
-}
-
 test_global_locator_ignores_external_log_by_default() {
   local pid alt_log_dir base output
   dead_pid pid
@@ -489,6 +429,87 @@ TEXT
   assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "global locator legacy override"
 }
 
+test_opaque_handle_resolves_via_locator() {
+  local handle="20260729-120000-ab12cd"
+  local log_file="$LOG_DIR/fresheyes-$handle.log"
+  printf 'review output line\n' > "$log_file"
+  printf '{"state":"running","provider":"gpt","mode":"manual","owner_pid":%s}\n' "$$" \
+    > "$log_file.status.json"
+  write_locator_alias "$handle" "$log_file"
+
+  local output
+  output=$(run_progress --json "$handle")
+  assert_json_field_equals "$output" "state" "running" "opaque handle state"
+  assert_json_field_equals "$output" "log_path" "$log_file" "opaque handle log_path"
+}
+
+test_owner_pid_read_from_status_json() {
+  # Log filename carries NO numeric pid suffix; liveness must come from
+  # status.json owner_pid (a live pid -> running).
+  local handle="20260729-120001-ff00aa"
+  local log_file="$LOG_DIR/fresheyes-$handle.log"
+  sleep 60 &
+  local live_pid=$!
+  LIVE_PIDS+=("$live_pid")
+  printf 'in progress\n' > "$log_file"
+  printf '{"state":"running","provider":"gpt","mode":"manual","owner_pid":%s}\n' "$live_pid" \
+    > "$log_file.status.json"
+  write_locator_alias "$handle" "$log_file"
+
+  local output
+  output=$(run_progress --json "$handle")
+  assert_json_field_equals "$output" "state" "running" "owner_pid liveness from status.json"
+  assert_json_field_equals "$output" "owner_pid" "$live_pid" "owner_pid surfaced"
+}
+
+test_parent_alias_no_longer_resolves() {
+  # .parent.<pid> trackers are dead: a handle whose ONLY tracker is a
+  # .parent file must not resolve.
+  local dead_pid
+  dead_pid=$(bash -c 'echo $$')   # already-reaped pid
+  local log_file="$LOG_DIR/fresheyes-20260729-120002-1234ab.log"
+  printf 'orphan review\n' > "$log_file"
+  printf '%s\n' "$log_file" > "$LOG_DIR/.parent.$dead_pid"
+
+  local output
+  output=$(run_progress --json "$dead_pid" || true)
+  local state
+  state=$(json_field "$output" "state")
+  if [[ "$state" != "missing" && "$state" != "unknown_handle" ]]; then
+    fail "expected unresolved state for .parent-only tracker, got: $state"
+  fi
+}
+
+test_progress_is_read_only() {
+  local handle="20260729-120003-c0ffee"
+  local log_file="$LOG_DIR/fresheyes-$handle.log"
+  printf 'some output\n' > "$log_file"
+  printf '{"state":"running","provider":"gpt","mode":"manual"}\n' > "$log_file.status.json"
+  write_locator_alias "$handle" "$log_file"
+  # Also plant the legacy-text failed-state bait that used to trigger rm -f .active.*
+  local dead_pid
+  dead_pid=$(bash -c 'echo $$')
+  local dead_log="$LOG_DIR/fresheyes-20260101-000000-$dead_pid.log"
+  printf 'stale\n' > "$dead_log"
+  printf '%s\n' "$dead_log" > "$LOG_DIR/.active.$dead_pid"
+
+  local before after
+  before=$(snapshot_dir "$LOG_DIR")
+  run_progress --json "$handle" >/dev/null || true
+  run_progress --result "$handle" >/dev/null 2>&1 || true
+  run_progress --json "$dead_pid" >/dev/null || true
+  run_progress --result "$dead_pid" >/dev/null 2>&1 || true
+  FRESHEYES_ALLOW_LEGACY_PROGRESS=1 run_progress "$dead_pid" >/dev/null 2>&1 || true
+  after=$(snapshot_dir "$LOG_DIR")
+  if [[ "$before" != "$after" ]]; then
+    fail "progress script mutated the log dir:
+--- before ---
+$before
+--- after ---
+$after"
+  fi
+}
+
 test_alive_claude_sidecars_missing_log
 test_alive_claude_sidecars_empty_log
 test_legacy_no_pid_preserves_numeric_progress
@@ -502,9 +523,10 @@ test_failed_status_ignores_incidental_verdict
 test_complete_without_verdict_returns_text
 test_dead_crash_missing_log_returns_diagnostics
 test_dead_crash_empty_log_returns_diagnostics
-test_dead_launcher_alias_to_live_owner_reports_running
-test_dead_launcher_alias_to_finished_owner_returns_review
-test_global_parent_alias_ignores_external_log_by_default
 test_global_locator_ignores_external_log_by_default
+test_opaque_handle_resolves_via_locator
+test_owner_pid_read_from_status_json
+test_parent_alias_no_longer_resolves
+test_progress_is_read_only
 
 printf 'fresheyes-progress tests passed\n'
