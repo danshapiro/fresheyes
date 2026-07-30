@@ -20,14 +20,14 @@
 - The legacy `missing` state is DELETED, not supplemented — replaced by `unknown_handle`. No output path may emit `state=missing` after Task 5.
 - `fresheyes-progress.sh` must never create/modify/delete any file (strictly read-only after Task 2).
 - Heartbeat period: 20s (`FRESHEYES_HEARTBEAT_SECS` override). Staleness threshold: 60s (`FRESHEYES_HEARTBEAT_STALE_SECS` override). Launch grace: 15s (`FRESHEYES_LAUNCH_GRACE_SECS` override). Env overrides exist for tests/tuning; defaults are the spec values.
-- Handle format: `<yyyymmdd-HHMMSS>-<6 hex from /dev/urandom>`, regex `^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$`. Opaque to callers — NOT a pid.
+- Handle format: `<yyyymmdd-HHMMSS>-<6 hex from /dev/urandom>`, regex `^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$` (unchanged), plus: the 6-hex suffix always contains at least one `[a-f]` by construction (all-digit suffixes collide with the legacy filename-pid fallback). Opaque to callers — NOT a pid.
 - Old numeric-pid handles from previous fresheyes versions must still resolve via their existing `.locator.<pid>` files.
 - `--json` polling exit codes: `launching`/`running`/`complete` → 0; `killed_at_launch` → 3; `died` → 4; `unknown_handle` → 5; usage errors stay 2.
 - Automatic mode and existing `--foreground` semantics are otherwise unchanged (automatic mode never detaches; `--foreground` streams synchronously).
 - Tests: standalone `bash tests/<file>.sh`, `set -euo pipefail`, fake providers via PATH-prepended `$TEST_TMP/bin`, every runner call wrapped in `timeout 30s`, success = trailing `... tests passed`. All four existing test files must pass at every commit.
 - README.md stays the only end-user markdown doc. `tests/manual/SPIKE-RESULT.md` and this plan are working/agent docs (allowed). SKILL.md is part of the product UI (required by spec).
 - Line numbers cited below (e.g. `fresheyes.sh:220`) are from the pre-change tree at commit `c354a9d`. Verify each anchor by its quoted content before editing; later tasks shift lines.
-- The load-bearing systemd-run premise MUST be validated under REAL `codex exec` (Task 1) before Task 8 is built. If the premise fails, Task 8 reduces to its documented fallback-only variant — items 1, 4, 5 ship regardless.
+- The load-bearing systemd-run premise MUST be validated under REAL `codex exec` (Task 1: differential cells, N>=3 fingerprint-validated runs each, unanimity required) before Task 8 is built. Only the literal `PREMISE: PASS` ships the systemd-run path; `PREMISE: FAIL` and `PREMISE: INCONCLUSIVE` (cell A survived — the tree-kill diagnosis itself unproven) both count as FAIL and reduce Task 8 to its documented fallback-only variant — items 1, 4, 5 ship regardless.
 
 ---
 
@@ -39,9 +39,11 @@
 
 **Interfaces:**
 - Consumes: nothing from other tasks (runs first).
-- Produces: `tests/manual/SPIKE-RESULT.md` containing a line `PREMISE: PASS` or `PREMISE: FAIL`. Task 8 reads exactly that line to decide whether the systemd-run detach path ships. Task 9's e2e script reuses the same codex-exec invocation shape.
+- Produces: `tests/manual/SPIKE-RESULT.md` containing exactly one literal line `PREMISE: PASS`, `PREMISE: FAIL`, or `PREMISE: INCONCLUSIVE`, plus a `RUNS: <k>/<N> ...` counts line. Task 8 greps exactly the PREMISE line to decide whether the systemd-run detach path ships — anything other than the literal `PREMISE: PASS` is treated as FAIL. Task 9's e2e script reuses the same codex-exec invocation shape.
 
 This is an experiment, not TDD. It must be run for real on this machine (codex is installed and configured with danger-full-access). A simulated killer proves nothing.
+
+Note (validation recon): there is counter-evidence that cell A may SURVIVE — codex-rs kill paths are process-group-scoped (`killpg` + PDEATHSIG), and github.com/openai/codex issue #10860 reports setsid children surviving the turn-end kill, while the only preserved field-death artifacts on this machine were provider RATE-LIMIT deaths. Cell A survival is therefore a live outcome with defined consequences — verdict `PREMISE: INCONCLUSIVE` (the tree-kill diagnosis itself is in question, so cell B's survival proves nothing about escaping it) plus the hedged `killed_at_launch` wording in Task 5 — not a fluke to "investigate".
 
 - [ ] **Step 1: Write the spike script**
 
@@ -49,24 +51,61 @@ This is an experiment, not TDD. It must be run for real on this machine (codex i
 #!/usr/bin/env bash
 # tests/manual/codex-exec-detach-spike.sh
 #
-# One-shot empirical validation of the load-bearing premise behind the
-# systemd-run detach path: a child of the systemd user manager (via D-Bus)
-# is outside the codex exec harness's process group / session / cgroup /
-# descendant tree, so it should survive the tree-kill that fires when the
-# foreground exec command exits.
+# Empirical validation of the load-bearing premise behind the systemd-run
+# detach path: a child of the systemd user manager (via D-Bus) is outside
+# the codex exec harness's process group / session / cgroup / descendant
+# tree, so it should survive the tree-kill that fires when the foreground
+# exec command exits.
+#
+# Falsification-proofed design:
+# - The detached child appends `HB <epoch>` every 1s for >=60s, traps
+#   SIGTERM/SIGHUP/SIGINT (appends `SIGNAL <name> <epoch>` before dying),
+#   and appends `DONE <epoch>` on completion — survival is judged from
+#   lifetime-spanning heartbeats, not a fixed sleep.
+# - Every codex exec start/return is timestamped (date +%s.%N) so heartbeat
+#   epochs are compared against the recorded return time.
+# - The shell command the agent runs writes a nonce fingerprint that the
+#   outer script validates — a paraphrasing agent or a sandbox-blocked bus
+#   INVALIDATES the run (rerun it) instead of corrupting the verdict.
+# - Each cell runs N>=3 times; the verdict is differential and unanimous.
 #
 # Run manually: bash tests/manual/codex-exec-detach-spike.sh
 # Requires: real `codex` CLI on PATH, authenticated, danger-full-access config.
+# Always pass --dangerously-bypass-approvals-and-sandbox explicitly — never
+# rely on config.toml (a future config edit could silently re-sandbox /tmp).
 # Record the full transcript and the verdict in tests/manual/SPIKE-RESULT.md.
 set -euo pipefail
 
 SPIKE_DIR="$(mktemp -d /tmp/fresheyes-spike.XXXXXX)"
 echo "spike dir: $SPIKE_DIR"
+N_RUNS="${SPIKE_RUNS:-3}"   # N>=3 per cell; unanimity required for PASS
 
-# Inner launcher A: current production mechanism (setsid + &).
+# Instrumented long-lived child: 1s heartbeats for >=60s, signal traps,
+# DONE marker, plus its own pid/pgid/sid + cgroup records.
+cat > "$SPIKE_DIR/instrumented-child.sh" <<'CHILD'
+#!/usr/bin/env bash
+MARKER="$1"
+ps -o pid,pgid,sid -p $$ > "$MARKER.child-ids" 2>&1
+cat /proc/self/cgroup > "$MARKER.child-cgroup" 2>&1
+trap 'echo "SIGNAL SIGTERM $(date +%s)" >> "$MARKER"; exit 1' TERM
+trap 'echo "SIGNAL SIGHUP $(date +%s)" >> "$MARKER"; exit 1' HUP
+trap 'echo "SIGNAL SIGINT $(date +%s)" >> "$MARKER"; exit 1' INT
+for _ in $(seq 1 60); do
+  echo "HB $(date +%s)" >> "$MARKER"
+  sleep 1
+done
+echo "DONE $(date +%s)" >> "$MARKER"
+CHILD
+chmod +x "$SPIKE_DIR/instrumented-child.sh"
+
+# Inner launcher A: current production mechanism (setsid + &). Records the
+# launcher's own pid/pgid/sid + cgroup so the kill domain is reconstructable.
 cat > "$SPIKE_DIR/launch-setsid.sh" <<EOF
 #!/usr/bin/env bash
-setsid bash -c 'sleep 8; echo alive > "$SPIKE_DIR/marker-setsid"' </dev/null >/dev/null 2>&1 &
+RUN_ID="\$1"
+ps -o pid,pgid,sid -p \$\$ > "$SPIKE_DIR/launcher-setsid-\$RUN_ID.ids" 2>&1
+cat /proc/self/cgroup > "$SPIKE_DIR/launcher-setsid-\$RUN_ID.cgroup" 2>&1
+setsid bash "$SPIKE_DIR/instrumented-child.sh" "$SPIKE_DIR/marker-setsid-\$RUN_ID" </dev/null >/dev/null 2>&1 &
 echo "launched setsid child: \$!"
 EOF
 
@@ -74,35 +113,113 @@ EOF
 # will use (WorkingDirectory + StandardError=append + StandardOutput=null).
 cat > "$SPIKE_DIR/launch-systemd-run.sh" <<EOF
 #!/usr/bin/env bash
+RUN_ID="\$1"
+ps -o pid,pgid,sid -p \$\$ > "$SPIKE_DIR/launcher-sdrun-\$RUN_ID.ids" 2>&1
+cat /proc/self/cgroup > "$SPIKE_DIR/launcher-sdrun-\$RUN_ID.cgroup" 2>&1
 systemd-run --user --collect --quiet \\
   --property=WorkingDirectory="$SPIKE_DIR" \\
   --property=StandardOutput=null \\
   --property=StandardError=append:"$SPIKE_DIR/sdrun.stderr" \\
-  /bin/bash -c 'sleep 8; echo alive > "$SPIKE_DIR/marker-systemd-run"'
+  /bin/bash "$SPIKE_DIR/instrumented-child.sh" "$SPIKE_DIR/marker-systemd-run-\$RUN_ID"
 echo "systemd-run launch exit: \$?"
 EOF
 
-echo
-echo "=== cell A: setsid under real codex exec (expected: marker ABSENT — harness kills the tree) ==="
-codex exec --dangerously-bypass-approvals-and-sandbox \
-  "Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: bash $SPIKE_DIR/launch-setsid.sh" || true
-sleep 12
-if [[ -f "$SPIKE_DIR/marker-setsid" ]]; then
-  echo "cell A result: setsid child SURVIVED (harness kill NOT reproduced — investigate before trusting cell B)"
-else
-  echo "cell A result: setsid child KILLED (matches the diagnosed failure)"
-fi
+# Fingerprinted agent execution: the command the agent is told to run writes
+# a per-run nonce fingerprint (nonce, pwd, uid, cgroup, bus reachability);
+# we validate it AFTER codex exec returns. Missing/wrong fingerprint means
+# the agent paraphrased the command or the sandbox blocked the bus — the
+# run is INVALID (rerun it), never counted for or against the premise.
+run_cell() {
+  # run_cell <cell-name> <launcher-script> <marker-file> <run-id>
+  local cell="$1" launcher="$2" marker="$3" run_id="$4"
+  local fingerprint="$SPIKE_DIR/fingerprint-$cell-$run_id"
+  rm -f "$marker" "$fingerprint"   # a rerun of an invalid attempt starts clean
+  local nonce
+  nonce="$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')"
+  local start_ts return_ts
+  start_ts=$(date +%s.%N)
+  codex exec --dangerously-bypass-approvals-and-sandbox \
+    "Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: { echo $nonce; pwd; id -u; cat /proc/self/cgroup; test -S \"\$XDG_RUNTIME_DIR/bus\" && echo BUS_OK || echo BUS_MISSING; } > $fingerprint 2>&1; bash $launcher $run_id" || true
+  return_ts=$(date +%s.%N)
+  printf '%s %s\n' "$start_ts" "$return_ts" > "$SPIKE_DIR/codex-times-$cell-$run_id"
+  echo "codex exec [$cell run $run_id]: start=$start_ts return=$return_ts"
+  if ! grep -q "$nonce" "$fingerprint" 2>/dev/null; then
+    echo "INVALID RUN [$cell run $run_id]: fingerprint missing or wrong nonce (agent paraphrased the command?)"
+    return 1
+  fi
+  if ! grep -q '^BUS_OK$' "$fingerprint"; then
+    echo "INVALID RUN [$cell run $run_id]: BUS_MISSING (sandbox blocked the user bus)"
+    return 1
+  fi
+  return 0
+}
+
+for run in $(seq 1 "$N_RUNS"); do
+  echo
+  echo "=== cell A run $run/$N_RUNS: setsid under real codex exec ==="
+  until run_cell A "$SPIKE_DIR/launch-setsid.sh" "$SPIKE_DIR/marker-setsid-$run" "$run"; do
+    echo "cell A run $run invalid — draining any stale child (60s window), then rerunning"
+    sleep 70
+  done
+  echo
+  echo "=== cell B run $run/$N_RUNS: systemd-run under real codex exec (THE load-bearing premise) ==="
+  until run_cell B "$SPIKE_DIR/launch-systemd-run.sh" "$SPIKE_DIR/marker-systemd-run-$run" "$run"; do
+    echo "cell B run $run invalid — draining any stale child (60s window), then rerunning"
+    sleep 70
+  done
+done
 
 echo
-echo "=== cell B: systemd-run under real codex exec (THE load-bearing premise) ==="
-codex exec --dangerously-bypass-approvals-and-sandbox \
-  "Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: bash $SPIKE_DIR/launch-systemd-run.sh" || true
-sleep 12
-if [[ -f "$SPIKE_DIR/marker-systemd-run" ]]; then
-  echo "cell B result: PREMISE HOLDS — systemd-run child survived the codex exec kill"
-else
-  echo "cell B result: PREMISE FAILS — systemd-run child was killed; drop the systemd-run mechanism (Task 8 fallback-only variant)"
-fi
+echo "waiting 70s for the final run's children to finish their >=60s heartbeat windows..."
+sleep 70
+
+# Differential verdict. Per run:
+# - cell A KILLED: no DONE line AND last HB <= codex-exec-return + margin
+#   (the setsid child provably died with the session).
+# - cell B SURVIVED: DONE line present AND HB epochs strictly after the
+#   recorded codex exec return (the unit child provably outlived the session).
+# PASS requires BOTH, unanimously across all N runs. Cell A surviving in ANY
+# run makes the verdict INCONCLUSIVE (the tree-kill diagnosis itself is in
+# question), never PASS.
+python3 - "$SPIKE_DIR" "$N_RUNS" <<'PY'
+import pathlib, sys
+spike = pathlib.Path(sys.argv[1]); n = int(sys.argv[2])
+MARGIN = 5.0  # seconds of slack past the recorded codex exec return
+
+def parse(marker):
+    hbs, done, signals = [], None, []
+    try:
+        for line in marker.read_text().splitlines():
+            parts = line.split()
+            if parts and parts[0] == "HB": hbs.append(float(parts[1]))
+            elif parts and parts[0] == "DONE": done = float(parts[1])
+            elif parts and parts[0] == "SIGNAL": signals.append(line)
+    except FileNotFoundError:
+        pass
+    return hbs, done, signals
+
+a_killed = b_survived = 0
+a_survived_any = False
+for run in range(1, n + 1):
+    a_ret = float((spike / f"codex-times-A-{run}").read_text().split()[1])
+    b_ret = float((spike / f"codex-times-B-{run}").read_text().split()[1])
+    a_hbs, a_done, a_sig = parse(spike / f"marker-setsid-{run}")
+    b_hbs, b_done, _ = parse(spike / f"marker-systemd-run-{run}")
+    a_kill = a_done is None and (not a_hbs or max(a_hbs) <= a_ret + MARGIN)
+    b_surv = b_done is not None and bool(b_hbs) and max(b_hbs) > b_ret
+    print(f"run {run}: cellA killed={a_kill} (hbs={len(a_hbs)} done={a_done} signals={a_sig or 'none'}) "
+          f"cellB survived={b_surv} (hbs={len(b_hbs)} done={b_done})")
+    a_killed += int(a_kill); b_survived += int(b_surv)
+    if not a_kill: a_survived_any = True
+
+if a_survived_any:
+    print("PREMISE: INCONCLUSIVE")
+elif a_killed == n and b_survived == n:
+    print("PREMISE: PASS")
+else:
+    print("PREMISE: FAIL")
+print(f"RUNS: {a_killed}/{n} cellA-killed, {b_survived}/{n} cellB-survived")
+PY
 
 echo
 echo "=== cell C: user bus unreachable -> runtime probe must fail cleanly ==="
@@ -122,7 +239,8 @@ cat "$SPIKE_DIR/env-probe.out" 2>/dev/null || echo "(no env-probe output)"
 echo "expected: SENTINEL=UNSET and a PATH without nvm dirs — every needed var must be forwarded via --setenv"
 
 echo
-echo "Now record the verdict: edit tests/manual/SPIKE-RESULT.md, set 'PREMISE: PASS' or 'PREMISE: FAIL',"
+echo "Now record the verdict: edit tests/manual/SPIKE-RESULT.md, copy the analyzer's"
+echo "literal 'PREMISE: ...' and 'RUNS: ...' lines verbatim (PASS / FAIL / INCONCLUSIVE),"
 echo "and paste this full transcript into the file."
 ```
 
@@ -134,7 +252,7 @@ Expected: no output, exit 0.
 - [ ] **Step 3: Run the spike for real**
 
 Run: `bash tests/manual/codex-exec-detach-spike.sh 2>&1 | tee /tmp/spike-transcript.txt`
-Expected: cell A prints `setsid child KILLED`, cell B prints either `PREMISE HOLDS` or `PREMISE FAILS`, cell C prints `probe fails without a bus`, cell D prints `SENTINEL=UNSET`. This takes a few minutes (two real codex exec sessions). If `codex exec` errors out entirely (auth, config), STOP and report — do not fabricate a verdict.
+Expected: N>=3 timestamped `codex exec [cell run]: start=... return=...` lines per cell, each run fingerprint-validated (any `INVALID RUN` is rerun automatically after a 70s drain — it never counts for or against the premise); the analyzer then prints one per-run line (`run N: cellA killed=... cellB survived=...`), exactly one literal verdict line `PREMISE: PASS` / `PREMISE: FAIL` / `PREMISE: INCONCLUSIVE`, and a `RUNS: <k>/<N> cellA-killed, <m>/<N> cellB-survived` counts line; cell C prints `probe fails without a bus`, cell D prints `SENTINEL=UNSET`. This takes a while (2×N real codex exec sessions plus heartbeat-drain waits). If `codex exec` errors out entirely (auth, config), STOP and report — do not fabricate a verdict.
 
 - [ ] **Step 4: Record the verdict**
 
@@ -146,14 +264,20 @@ Write `tests/manual/SPIKE-RESULT.md` with exactly this structure (fill in the re
 Date: <date -u output>
 Machine: WSL2 (see uname -a below)
 
-PREMISE: PASS   <!-- or: PREMISE: FAIL -->
+PREMISE: PASS   <!-- or: PREMISE: FAIL / PREMISE: INCONCLUSIVE — copy the analyzer's literal verdict line; Task 8 greps exactly this -->
+RUNS: <k>/<N> cellA-killed, <m>/<N> cellB-survived   <!-- copy the analyzer's counts line -->
 
-- cell A (setsid under codex exec): KILLED / SURVIVED
-- cell B (systemd-run under codex exec): SURVIVED / KILLED
+- cell A (setsid under codex exec, N runs): KILLED k/N — per-run last-HB vs codex-exec-return timestamps below
+- cell B (systemd-run under codex exec, N runs): SURVIVED m/N — HB after recorded return + DONE reached
+- fingerprint checks: every accepted run nonce-validated with BUS_OK (list any INVALID RUN reruns here)
 - cell C (bus-absent probe): FAILED CLEANLY / UNEXPECTED SUCCESS
 - cell D (env inheritance): SENTINEL=UNSET (confirmed --setenv requirement)
 
-Decision: Task 8 ships the systemd-run detach path.   <!-- or: Task 8 ships fallback-only; setsid remains the sole detach path. -->
+Decision: Task 8 ships the systemd-run detach path.   <!-- PASS only. FAIL or INCONCLUSIVE: Task 8 ships fallback-only; setsid remains the sole detach path. -->
+
+## Per-run timestamps
+
+<paste the `codex exec [cell run]: start=... return=...` lines and the analyzer's per-run `run N: ...` lines verbatim>
 
 ## Full transcript
 
@@ -166,8 +290,10 @@ Decision: Task 8 ships the systemd-run detach path.   <!-- or: Task 8 ships fall
 git add tests/manual/codex-exec-detach-spike.sh tests/manual/SPIKE-RESULT.md
 git commit -m "test: spike systemd-run survival under real codex exec
 
-Transcript and PASS/FAIL verdict recorded in tests/manual/SPIKE-RESULT.md;
-gates whether the systemd-run detach path ships."
+Differential design: N>=3 fingerprint-validated runs per cell, 1s heartbeat
+markers with signal traps, codex exec return timestamps. Transcript and the
+PASS/FAIL/INCONCLUSIVE verdict recorded in tests/manual/SPIKE-RESULT.md;
+only the literal 'PREMISE: PASS' ships the systemd-run detach path."
 ```
 
 ---
@@ -361,7 +487,7 @@ git commit -m "feat: progress script takes opaque handles, drops .parent, is rea
 **Interfaces:**
 - Consumes: Task 2's opaque-handle resolution (`.locator.<handle>` → base) and `_owner_pid_for_base` (reads status.json `owner_pid`).
 - Produces:
-  - `mint_handle()` → prints `<yyyymmdd-HHMMSS>-<6 hex>`.
+  - `mint_handle()` → prints `<yyyymmdd-HHMMSS>-<6 hex>`; the 6-hex suffix always contains at least one `[a-f]` by construction (all-digit suffixes collide with the legacy filename-pid fallback).
   - Env contract to the child: `FRESHEYES_DAEMONIZED=1`, `FRESHEYES_HANDLE=<handle>`, `FRESHEYES_LOG_FILE=<abs log path>`.
   - status.json gains fields: `owner_pid` (int, child only), `launched_at` (float epoch, set once), `detach_method` (string), `heartbeat_at` (float epoch, set on every non-`launching` write). Existing fields (`severity`, `state`, `provider`, `mode`, `pid`, `log_path`, `updated_at_epoch`, `exit_code`, `verdict`) keep their names; `pid` mirrors `owner_pid` for legacy readers.
   - `write_status <state> <exit_code> <verdict>` — same call signature as today; reads globals `STATUS_FILE`, `PROVIDER`, `MODE`, `LOG_FILE`, `OWNER_PID`, `LAUNCHED_AT_EPOCH`, `DETACH_METHOD`. Read-modify-write, atomic replace. `DETACH_METHOD` overwrites; `launched_at` is set-once.
@@ -530,9 +656,29 @@ test_monitor_mode_launch_handle_still_resolves() {
   wait_for_state "$log_dir" "$handle" "complete" "monitor-mode launch" >/dev/null
 }
 
+# --- handle minting: the 6-hex suffix must always contain >=1 [a-f].
+# All-digit suffixes match the retained legacy filename-pid regex
+# -([0-9]+)\.log$ and (leading zeros stripped) can resolve to always-live
+# low pids, permanently masking killed_at_launch/died — guarded at mint time.
+test_mint_handle_suffix_always_has_hex_letter() {
+  local fn
+  fn=$(sed -n '/^mint_handle()/,/^}/p' "$RUNNER")
+  [[ -n "$fn" ]] || fail "mint_handle not found in runner"
+  local i handle suffix
+  for i in $(seq 1 50); do
+    handle=$(bash -c "$fn; mint_handle")
+    [[ "$handle" =~ ^[0-9]{8}-[0-9]{6}-[0-9a-f]{6}$ ]] \
+      || fail "minted handle malformed: $handle"
+    suffix="${handle##*-}"
+    [[ "$suffix" =~ [a-f] ]] \
+      || fail "all-digit suffix minted (collides with legacy filename-pid fallback): $handle"
+  done
+}
+
 make_fake_claude
 test_plain_launch_trackers_and_completion
 test_monitor_mode_launch_handle_still_resolves
+test_mint_handle_suffix_always_has_hex_letter
 
 printf 'fresheyes-detach tests passed\n'
 ```
@@ -553,10 +699,19 @@ GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
 mkdir -p "$LOG_DIR"
 
-# Opaque run handle: parent-minted, never a pid.
+# Opaque run handle: parent-minted, never a pid. The 6-hex suffix must
+# contain at least one [a-f]: all-digit suffixes (probability (10/16)^6
+# ≈ 6%) match the retained legacy filename-pid regex `-([0-9]+)\.log$`,
+# and with leading zeros stripped a suffix like 000002 resolves to an
+# always-live low pid — permanently masking killed_at_launch/died during
+# the ownerless launching window (proven by repro).
 mint_handle() {
-  printf '%s-%s\n' "$(date +%Y%m%d-%H%M%S)" \
-    "$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  local suffix
+  while :; do
+    suffix="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+    [[ "$suffix" =~ [a-f] ]] && break
+  done
+  printf '%s-%s\n' "$(date +%Y%m%d-%H%M%S)" "$suffix"
 }
 
 if [[ -n "${FRESHEYES_HANDLE:-}" && -n "${FRESHEYES_LOG_FILE:-}" ]]; then
@@ -748,11 +903,11 @@ is captured to <log>.launch.stderr. .parent.\$PPID writer deleted."
 
 **Interfaces:**
 - Consumes: `STATUS_FILE`, `write_status`, `HEARTBEAT_PID` global, Task 3's status.json shape.
-- Produces: `touch_heartbeat()` — atomically updates only `heartbeat_at` in status.json; a background loop calls it every `${FRESHEYES_HEARTBEAT_SECS:-20}` seconds for the life of the review; `_stop_heartbeat` is called before EVERY terminal `write_status` so a stale heartbeat write can never clobber a terminal state. Task 5's `died` detection reads `heartbeat_at`.
+- Produces: `touch_heartbeat()` — atomically updates only `heartbeat_at` in status.json, and exits WITHOUT writing when the record is already in a terminal state (`complete`/`failed` — the exact terminal set Task 5 consumes); a background loop calls it every `${FRESHEYES_HEARTBEAT_SECS:-20}` seconds for the life of the review and self-terminates when the owner pid is gone (`kill -0` check each iteration — a SIGKILLed owner must not leave an orphan heartbeat masking `died`); `_stop_heartbeat` is called before EVERY terminal `write_status` so a stale heartbeat write can never clobber a terminal state. Task 5's `died` detection reads `heartbeat_at`.
 
 - [ ] **Step 1: Write the failing test**
 
-Add to `tests/fresheyes-detach-test.sh` (before the final `printf`), and add `test_heartbeat_advances` to the call list:
+Add to `tests/fresheyes-detach-test.sh` (before the final `printf`), and add `test_heartbeat_advances` and `test_heartbeat_never_overwrites_terminal_state` to the call list:
 
 ```bash
 # Heartbeat: with a slowed fake provider and a 1s heartbeat period, the
@@ -790,6 +945,30 @@ test_heartbeat_advances() {
     "$first" "$second" || fail "heartbeat_at did not advance ($first -> $second)"
   wait_for_state "$log_dir" "$handle" "complete" "heartbeat run completes" >/dev/null
 }
+
+# Terminal-state precedence: a stale touch_heartbeat must never resurrect
+# state=running over a terminal record (the orphaned-python interleaving —
+# kill $HEARTBEAT_PID covers only the subshell). Exercise the writer
+# directly against a completed run's status.json.
+test_heartbeat_never_overwrites_terminal_state() {
+  local log_dir="$TEST_TMP/logs-hbterm"
+  mkdir -p "$log_dir"
+  local stdout handle base
+  stdout=$(launch "$log_dir" "$RUNNER" --claude "review HEAD")
+  handle=$(parse_handle "$stdout")
+  wait_for_state "$log_dir" "$handle" "complete" "terminal-guard run completes" >/dev/null
+  base=$(tr -d '\n' < "$log_dir/.locator.$handle")
+  local fn
+  fn=$(sed -n '/^touch_heartbeat()/,/^}/p' "$RUNNER")
+  [[ -n "$fn" ]] || fail "touch_heartbeat not found in runner"
+  local before after
+  before=$(cat "$base.status.json")
+  bash -c "STATUS_FILE='$base.status.json'; $fn; touch_heartbeat"
+  after=$(cat "$base.status.json")
+  [[ "$before" == "$after" ]] || fail "touch_heartbeat wrote over a terminal state:
+before: $before
+after:  $after"
+}
 ```
 
 Note: the fake claude in this file sleeps BEFORE emitting its result when `FRESHEYES_FAKE_DELAY` is set, keeping the review alive ~6s. If `env -u ANTHROPIC_API_KEY ... claude` invocation strips `FRESHEYES_FAKE_DELAY`, export it in `launch` the same way the model vars are passed.
@@ -816,6 +995,12 @@ try:
         record = json.load(handle)
 except Exception:
     record = {}
+# Terminal-state precedence: `kill $HEARTBEAT_PID` covers only the subshell —
+# an already-forked python can commit a whole stale record AFTER the terminal
+# write, resurrecting state=running (later misread as died). Never write over
+# a terminal state.
+if record.get("state") in ("complete", "failed"):
+    sys.exit(0)
 record["heartbeat_at"] = time.time()
 tmp_path = f"{path}.tmp.hb.{os.getpid()}"
 with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -828,6 +1013,10 @@ _start_heartbeat() {
   (
     while true; do
       sleep "${FRESHEYES_HEARTBEAT_SECS:-20}"
+      # Self-terminate when the owner is gone: a SIGKILLed owner never runs
+      # _stop_heartbeat, and an orphan loop beating status.json forever would
+      # mask `died` permanently.
+      kill -0 "${OWNER_PID:-$$}" 2>/dev/null || exit 0
       touch_heartbeat
     done
   ) &
@@ -868,8 +1057,10 @@ git commit -m "feat: file-based heartbeat every 20s
 
 The detached child touches status.json heartbeat_at from a background
 loop (FRESHEYES_HEARTBEAT_SECS, default 20). Heartbeat stops before any
-terminal status write so terminal states can't be clobbered. Replaces
-the inert 300s stderr echo."
+terminal status write, never writes over a terminal state (a mid-flight
+python outlives the subshell kill), and the loop self-terminates when
+the owner pid dies (a SIGKILLed owner can't leave an orphan beat masking
+died). Replaces the inert 300s stderr echo."
 ```
 
 ---
@@ -936,7 +1127,7 @@ test_killed_at_launch_harness_variant() {
   local message
   message=$(json_field "$output" "message")
   assert_contains "$message" "never wrote its first heartbeat" "killed_at_launch observation"
-  assert_contains "$message" "harness kills detached processes" "killed_at_launch likely cause"
+  assert_contains "$message" "kills or reaps detached processes" "killed_at_launch likely cause (hedged)"
   assert_contains "$message" "--foreground" "killed_at_launch remediation"
 }
 
@@ -1195,7 +1386,7 @@ _killed_at_launch_message() {
       "$launch_stderr" \
       "$(tail -n 3 "$launch_stderr" | tr '\n' ' ' | cut -c1-300)"
   else
-    printf 'the review child never wrote its first heartbeat — most often because the calling harness kills detached processes when the launch command exits; re-run the same command with --foreground (works regardless of cause)'
+    printf 'the review child never wrote its first heartbeat — commonly because the calling harness kills or reaps detached processes when the launch command exits; re-run the same command with --foreground (works regardless of cause)'
   fi
 }
 
@@ -1214,6 +1405,8 @@ _died_message() {
     "$base" "$recorded" "$died_human"
 }
 ```
+
+Note on the causal wording in `_killed_at_launch_message`: the harness-kill diagnosis is hedged deliberately ("commonly because ... kills or reaps"), never asserted as fact. If Task 1's verdict is `PREMISE: INCONCLUSIVE` (cell A survived — the tree-kill diagnosis itself unproven), the message must NOT assert the harness-kill diagnosis as established; keep the hedged wording above or weaken it further. The state machine and the `--foreground` remediation are unchanged either way.
 
 3d. **Output dispatch** (old `:680-712`):
 - `--json` (old `:681-682`): pass `"$MESSAGE"` as the 8th arg to `print_json_status`, then `exit "$STATE_EXIT_CODE"` instead of `exit 0`.
@@ -1340,7 +1533,7 @@ Expected: PASS. Also run `bash tests/fresheyes-claude-provider-test.sh` and `bas
 Replace Step 4's receipt block (old `:66-74`) with:
 
 ```markdown
-Manual reviews detach automatically, so this returns in under a second and prints exactly two lines:
+Manual reviews detach automatically, so this returns within a couple of seconds and prints exactly two lines:
 
 ```
 FRESHPID=20260729-181530-a3f9c2
@@ -1367,7 +1560,15 @@ Each poll returns one JSON line. The `state` field and the command's exit code t
 | `unknown_handle` | 5 | no tracker for this handle | the handle is wrong, or its trackers were removed (e.g. /tmp cleanup); re-check the receipt, else relaunch |
 
 `launching` and `running` are healthy states — never treat them as failures, and never abort a poll loop on them. The three failure states carry a `message` field with the observation, likely cause, and the exact remediation; relay it and follow it.
+
+Poll exit-tolerantly: the failure states return NONZERO exit codes (3/4/5), so a `set -e`-style loop would abort on the very poll that carries the diagnosis. Capture the output and branch on the JSON `state` field (or the captured exit code):
+
+    output=$(bash <base-directory>/fresheyes-progress.sh --json <handle> || true)
+
+then read `state` from the captured JSON. Never let a nonzero poll exit kill your loop before you have read the `message`.
 ```
+
+(The receipt latency wording is deliberately "a couple of seconds", not "<1 second" — the auto-path runtime probe's worst case is its hard 2s timeout. The exit-code table plus the exit-tolerant polling instruction matter beyond this repo: the `~/.codex/skills/fresheyes` copy syncs separately as a unit, so this SKILL.md text is what self-heals the polling contract for agents at rollout.)
 
 Update Step 6 (old `:110-121`): map the actions to the six states (delete the `missing` line at old `:117`); keep the "never kill a review" and stall-escalation guidance. Keep Step 7 (`--result`), Parallel reviews, and Common Mistakes sections, updating any `missing`/digit-parsing/120s references. Keep the frontmatter untouched. Do NOT document `detach_method` internals beyond the state table, and do not tell callers to read status.json directly (old `:146`'s "never read the log directly" rule stays).
 
@@ -1466,7 +1667,9 @@ fi
 
 Apply the same shape to the claude section (old `:135-161`) with `CLAUDE_BIN`/`FRESHEYES_CLAUDE_BIN`. The wrapping goes around the provider-specific branch that already exists (only the active provider is validated — keep that behavior; set the BIN var only for the active provider).
 
-3b. In the provider run functions: replace bare `codex` invocations (old `:404`, `:427`) with `"$CODEX_BIN"` and bare `claude` in the `env -u ... claude` invocations (old `:436`, `:466`) with `"$CLAUDE_BIN"`.
+3b. In the provider run functions: replace bare `codex` invocations (old `:398`, `:419` — the `if ! codex exec \` lines) with `"$CODEX_BIN"` and bare `claude` in the `env -u ... claude` invocations (old `:436`, `:466`) with `"$CLAUDE_BIN"`.
+
+Note: two codex binaries exist on this dev machine (nvm npm 0.145.0 vs `~/.local/bin` standalone 0.146.0); `command -v` resolution follows the caller's PATH order, and forwarding whatever the parent resolved is the intended behavior.
 
 3c. In the detach env prefix (Task 3's line), add the forwards:
 
@@ -1507,14 +1710,14 @@ needed because systemd-run units do not inherit the caller's PATH."
 - Test: `tests/fresheyes-detach-test.sh`
 
 **Interfaces:**
-- Consumes: `tests/manual/SPIKE-RESULT.md` (`PREMISE: PASS` or `PREMISE: FAIL`); Task 3's `DETACH_METHOD` global and `write_status` (which overwrites `detach_method`); Task 7's `FRESHEYES_*_BIN` forwarding.
-- Produces: `_probe_systemd_run()` (runtime probe by launching a trivial unit — never `command -v` alone); `launch_via_systemd_run()`; env override `FRESHEYES_DETACH=auto|setsid|systemd-run` (default `auto`); `detach_method` recorded in status.json (`systemd-run` or `setsid`); caller-facing receipt IDENTICAL on both paths.
+- Consumes: `tests/manual/SPIKE-RESULT.md` (`PREMISE: PASS` / `PREMISE: FAIL` / `PREMISE: INCONCLUSIVE`); Task 3's `DETACH_METHOD` global and `write_status` (which overwrites `detach_method`); Task 7's `FRESHEYES_*_BIN` forwarding.
+- Produces: `_probe_systemd_run()` (runtime probe with a hard 2s timeout, by launching a trivial unit — never `command -v` alone); `launch_via_systemd_run()`; env override `FRESHEYES_DETACH=auto|setsid|systemd-run` (default `auto`); `detach_method` recorded in status.json (`systemd-run` or `setsid`); caller-facing receipt IDENTICAL on both paths.
 
 - [ ] **Step 0: Read the gate**
 
 Run: `grep '^PREMISE:' tests/manual/SPIKE-RESULT.md`
-- If `PREMISE: FAIL`: do NOT build the systemd-run mechanism. This task reduces to: (a) confirm `detach_method` is always `setsid` in status.json (already true from Task 3); (b) append a short section to `tests/manual/SPIKE-RESULT.md` titled `## Outcome` stating "systemd-run detach dropped per spike; setsid remains the only detach path; the shipped product is the loud killed_at_launch detection + remediation"; (c) commit that note (`git commit -m "docs: record systemd-run premise failure; detach stays setsid-only"`) and mark the remaining steps of this task complete. Items 1, 4, 5 stand fully regardless.
-- If `PREMISE: PASS`: proceed with all steps below.
+- Anything other than the literal `PREMISE: PASS` (i.e. `PREMISE: FAIL`, `PREMISE: INCONCLUSIVE`, or a missing/mangled line) is treated as FAIL: do NOT build the systemd-run mechanism. This task reduces to: (a) confirm `detach_method` is always `setsid` in status.json (already true from Task 3); (b) append a short section to `tests/manual/SPIKE-RESULT.md` titled `## Outcome` stating "systemd-run detach dropped per spike (verdict: FAIL or INCONCLUSIVE — quote it); setsid remains the only detach path; the shipped product is the loud killed_at_launch detection + remediation"; (c) commit that note (`git commit -m "docs: record systemd-run premise failure; detach stays setsid-only"`) and mark the remaining steps of this task complete. Items 1, 4, 5 stand fully regardless.
+- If the line is exactly `PREMISE: PASS`: proceed with all steps below.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1613,7 +1816,10 @@ In `skills/fresheyes/fresheyes.sh`, add above the detach block:
 # be unreachable in some harnesses). Prove it by launching a trivial unit.
 _probe_systemd_run() {
   command -v systemd-run &> /dev/null || return 1
-  systemd-run --user --collect --quiet --wait /bin/true >/dev/null 2>&1
+  # Hard 2s cap (measured): healthy-bus probe is 0.02-0.28s, but a half-up
+  # (accepting-but-mute) bus socket blocks the probe >40s in the sd-bus auth
+  # handshake — dead/absent sockets fail in 0.01s, only the half-up case hangs.
+  timeout 2s systemd-run --user --collect --quiet --wait /bin/true >/dev/null 2>&1
 }
 
 launch_via_systemd_run() {
@@ -1710,6 +1916,19 @@ is forwarded via --setenv. detach_method recorded in status.json;
 receipt identical on both paths. FRESHEYES_DETACH=auto|setsid|systemd-run."
 ```
 
+- [ ] **Step 6: PASS-path pre-ship check — one REAL-provider detached review**
+
+Clean-env bootstrap of both CLIs (PATH/HOME/TMPDIR only) is already verified, including inside a `--setenv` transient unit; this step closes only the remaining authenticated-review residual (auth/network paths a `--version` probe never exercises).
+
+Run ONE real-provider detached review via systemd-run outside any harness — a plain terminal, normal product use, e.g.:
+
+```bash
+FRESHEYES_DETACH=systemd-run bash skills/fresheyes/fresheyes.sh --claude "review HEAD"
+# then poll the printed NEXT: command until state=complete
+```
+
+Expected: the review reaches `complete` with a verdict. On failure: capture the transient unit's environment (`systemctl --user show -p Environment <unit>`, or log it from inside the unit) and close the gap with additional `--setenv` entries / `--property=EnvironmentFile=` — that is the designed fix path; do not fall back to forwarding the whole caller env. Note the outcome (one line) in `tests/manual/SPIKE-RESULT.md` under `## Outcome` and amend/commit.
+
 ---
 
 ### Task 9: real `codex exec` end-to-end leg + final verification
@@ -1720,7 +1939,7 @@ receipt identical on both paths. FRESHEYES_DETACH=auto|setsid|systemd-run."
 
 **Interfaces:**
 - Consumes: everything shipped in Tasks 2-8; Task 1's spike verdict; the real `codex` CLI.
-- Produces: recorded proof (transcript in the commit message body and in `tests/manual/SPIKE-RESULT.md`) that (i) with `PREMISE: PASS`, a systemd-run-detached review launched INSIDE `codex exec` survives and completes with a fake provider, and (ii) with the user bus absent, the probe fails, setsid fallback engages, the harness kills it, and polling reports `killed_at_launch` with the remediation text. With `PREMISE: FAIL`, cell 1 is skipped and cell 2 is the whole product proof.
+- Produces: recorded proof (transcript in the commit message body and in `tests/manual/SPIKE-RESULT.md`) that (i) with `PREMISE: PASS`, a systemd-run-detached review launched INSIDE `codex exec` — slowed by `FRESHEYES_FAKE_DELAY=30` so it is still in flight when codex exec returns — has its owner process provably alive AFTER the recorded return time and then completes with a fake provider, and (ii) with the user bus absent, the probe fails, setsid fallback engages, the harness kills it, and polling reports `killed_at_launch` with the remediation text. With any non-PASS verdict, cell 1 is skipped and cell 2 is the whole product proof.
 
 - [ ] **Step 1: Write the e2e script**
 
@@ -1779,15 +1998,33 @@ if grep -q '^PREMISE: PASS' "$ROOT_DIR/tests/manual/SPIKE-RESULT.md"; then
   echo "=== cell 1: systemd-run detach survives codex exec and completes ==="
   LOG_DIR_1="$E2E_TMP/logs-survive"
   mkdir -p "$LOG_DIR_1"
+  # FRESHEYES_FAKE_DELAY=30 keeps the review in flight past codex exec's
+  # return: measured, the no-delay fake review completes in ~0.5s — before
+  # any turn-end kill could land, leaving the cell blind by arithmetic.
   codex exec --dangerously-bypass-approvals-and-sandbox \
-    "Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: env PATH=\"$FAKE_BIN:\$PATH\" FRESHEYES_LOG_DIR=$LOG_DIR_1 FRESHEYES_GLOBAL_LOG_DIR=$LOG_DIR_1 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash $RUNNER --claude 'review HEAD'" || true
+    "Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: env PATH=\"$FAKE_BIN:\$PATH\" FRESHEYES_LOG_DIR=$LOG_DIR_1 FRESHEYES_GLOBAL_LOG_DIR=$LOG_DIR_1 FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash $RUNNER --claude 'review HEAD'" || true
+  RETURN_TS_1=$(date +%s.%N)
+  echo "codex exec returned at: $RETURN_TS_1"
   H1=$(handle_from_dir "$LOG_DIR_1")
   echo "handle: ${H1:-NONE}"
   [[ -n "$H1" ]] || { echo "cell 1 FAILED: no locator written"; exit 1; }
+  # FIRST prove survival: the owner process must still be alive AFTER the
+  # recorded codex exec return (the fake provider has ~30s left to run).
+  BASE_1=$(tr -d '\n' < "$LOG_DIR_1/.locator.$H1")
+  OWNER_1=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("owner_pid",""))' \
+    "$BASE_1.status.json" 2>/dev/null || echo "")
+  [[ "$OWNER_1" =~ ^[0-9]+$ ]] || { echo "cell 1 FAILED: no owner_pid recorded after codex exec returned"; exit 1; }
+  if kill -0 "$OWNER_1" 2>/dev/null; then
+    echo "cell 1 survival proven: owner $OWNER_1 alive after codex exec return ($RETURN_TS_1)"
+  else
+    echo "cell 1 FAILED: owner $OWNER_1 already dead after codex exec return — the unit did not survive"
+    exit 1
+  fi
+  # THEN poll to complete.
   poll_until "$LOG_DIR_1" "$H1" "complete" || { echo "cell 1 FAILED"; exit 1; }
-  echo "cell 1 PASSED: detached review survived codex exec and completed"
+  echo "cell 1 PASSED: detached review survived codex exec (owner alive post-return) and completed"
 else
-  echo "=== cell 1 SKIPPED: spike verdict is PREMISE: FAIL (setsid-only build) ==="
+  echo "=== cell 1 SKIPPED: spike verdict is not PREMISE: PASS (setsid-only build) ==="
 fi
 
 echo
@@ -1825,7 +2062,7 @@ echo "e2e done. Record this transcript in tests/manual/SPIKE-RESULT.md and the c
 - [ ] **Step 2: Syntax-check and run for real**
 
 Run: `bash -n tests/manual/codex-exec-e2e.sh && bash tests/manual/codex-exec-e2e.sh 2>&1 | tee /tmp/e2e-transcript.txt`
-Expected: `cell 1 PASSED` (when premise PASS) and `cell 2 PASSED` (or the explicitly-noted INCONCLUSIVE variant if the harness happens not to kill on that run — the deterministic simulation in `tests/fresheyes-detach-test.sh` covers the state machine either way; the FRESHEYES_FAKE_DELAY=30 keeps the child mid-startup long enough that a kill lands before completion). If cell 1 FAILS with premise PASS, STOP: the systemd-run path does not actually survive when carrying the full fresheyes child — investigate (most likely a missing `--setenv`) before proceeding; do not paper over it.
+Expected: cell 1 prints `survival proven: owner <pid> alive after codex exec return` and then `cell 1 PASSED` (when premise PASS; both cells use FRESHEYES_FAKE_DELAY=30 so the review is still in flight when codex exec returns — without it the no-delay fake completes in ~0.5s and the cell is blind by arithmetic), and `cell 2 PASSED` (or the explicitly-noted INCONCLUSIVE variant if the harness happens not to kill on that run — the deterministic simulation in `tests/fresheyes-detach-test.sh` covers the state machine either way; in cell 2 the delay keeps the child mid-review long enough that a kill lands before completion). If cell 1 FAILS with premise PASS, STOP: the systemd-run path does not actually survive when carrying the full fresheyes child — investigate (most likely a missing `--setenv`) before proceeding; do not paper over it.
 
 - [ ] **Step 3: Append the transcript**
 
@@ -1849,8 +2086,10 @@ git add tests/manual/codex-exec-e2e.sh tests/manual/SPIKE-RESULT.md
 git commit -F- <<'MSG'
 test: real codex exec e2e leg for detach survival and killed_at_launch
 
-Cell 1: systemd-run-detached review launched inside real codex exec
-survives the harness tree-kill and completes with a fake provider.
+Cell 1: systemd-run-detached review launched inside real codex exec,
+slowed by FRESHEYES_FAKE_DELAY=30 so it is still in flight at turn end;
+its owner process is proven alive AFTER the recorded codex exec return,
+then the review completes with the fake provider.
 Cell 2: with the user bus absent the probe fails, setsid fallback
 engages, the harness kill lands, and polling reports killed_at_launch
 (exit 3) with the --foreground remediation.
@@ -1867,8 +2106,8 @@ MSG
 - Item 1 parent-owned identity, opaque handle, pre-detach locator+status, env handoff, owner_pid, `FRESHPID=<handle>` line, non-numeric `ps -p` guard, old numeric handles resolve → Tasks 2, 3.
 - `.parent.$PPID` writer+reader deleted atomically → Task 2 (reader) + Task 3 (writer); interim window is safe because the reader deletion only removes a fallback.
 - Item 2 plumbing (bin forwarding, cheap re-check, no safety claims) → Task 7.
-- Item 3 systemd-run gated on the real-codex-exec spike; runtime probe (not `command -v`); explicit `--setenv` forwarding; `detach_method` recorded; identical receipt; setsid fallback → Tasks 1, 8.
-- Item 4 six states with exit codes; killed_at_launch message conditioned on `<LOG_FILE>.launch.stderr` (empty → harness-kill wording + `--foreground`; non-empty → crashed + points at it); died leads with log path + time of death; `missing` deleted (both emission sites); heartbeat 20s via status.json touch replacing the 300s stderr echo; 60s staleness (≥2x period); progress strictly read-only (`rm -f .active.*` removed) → Tasks 2, 3 (stderr capture), 4, 5.
+- Item 3 systemd-run gated on the real-codex-exec spike (differential, N>=3 fingerprint-validated runs; only the literal `PREMISE: PASS` ships — FAIL/INCONCLUSIVE reduce to fallback-only); runtime probe with a hard 2s timeout (not `command -v` alone); explicit `--setenv` forwarding; PASS-path pre-ship real-provider detached review; `detach_method` recorded; identical receipt; setsid fallback → Tasks 1, 8.
+- Item 4 six states with exit codes; killed_at_launch message conditioned on `<LOG_FILE>.launch.stderr` (empty → hedged kills-or-reaps wording + `--foreground`; non-empty → crashed + points at it); died leads with log path + time of death; `missing` deleted (both emission sites); heartbeat 20s via status.json touch replacing the 300s stderr echo; 60s staleness (≥2x period); progress strictly read-only (`rm -f .active.*` removed) → Tasks 2, 3 (stderr capture), 4, 5.
 - Item 5 exactly-two-line receipt, no NOTE line, no status path → Tasks 3, 6.
 - Item 6 → CUT; no task implements a launch-time warning.
 - SKILL.md ships in the same change: new receipt, six states with exit codes and caller actions, honest `--foreground` guidance (remediation for killed_at_launch; requires harness timeout > 5-30 min and how to request it) → Task 6.
