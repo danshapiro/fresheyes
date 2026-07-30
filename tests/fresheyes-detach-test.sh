@@ -620,6 +620,28 @@ test_bus_absent_probe_falls_back_to_setsid() {
     || fail "bus-absent launch should fall back to setsid: $output"
 }
 
+# --- fail-loud launching write: the parent must never print a receipt when
+# its authoritative pre-detach status write failed (untrackable review).
+test_parent_launching_write_fails_loud() {
+  local log_dir="$TEST_TMP/logs-launchfail"
+  mkdir -p "$log_dir"
+  local stdout_file="$TEST_TMP/launchfail-out.txt" stderr_file="$TEST_TMP/launchfail-err.txt"
+  chmod 555 "$log_dir"   # status.json (and its tmp file) become unwritable
+  local rc
+  set +e
+  launch "$log_dir" "$RUNNER" --claude "review HEAD" >"$stdout_file" 2>"$stderr_file"
+  rc=$?
+  set -e
+  chmod 755 "$log_dir"
+  [[ "$rc" -ne 0 ]] || fail "unwritable status file must fail the launch"
+  if grep -q '^FRESHPID=' "$stdout_file"; then
+    fail "no receipt may be printed when the launching write fails:
+$(cat "$stdout_file")"
+  fi
+  assert_contains "$(cat "$stderr_file")" "failed to write the initial status file" \
+    "fail-loud launching write message"
+}
+
 # --- (f) progress never writes, across every state
 test_progress_read_only_all_states() {
   for dir in "$TEST_TMP"/logs-*; do
@@ -661,6 +683,7 @@ test_systemd_run_detach_forwards_env_and_records_method
 test_systemd_run_scope_dollar_sequences_survive
 test_systemd_run_launch_failure_falls_back_to_setsid
 test_bus_absent_probe_falls_back_to_setsid
+test_parent_launching_write_fails_loud
 test_progress_read_only_all_states
 
 printf 'fresheyes-detach tests passed\n'

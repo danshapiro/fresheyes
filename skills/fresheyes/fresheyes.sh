@@ -278,13 +278,17 @@ write_tracker_alias() {
 # Atomic status.json writer. Read-modify-write so parent-written fields
 # (launched_at) survive child updates. Call shape unchanged:
 #   write_status <state> <exit_code> <verdict>
+# Returns the python writer's exit status. The parent's pre-detach
+# "launching" write is a contract (locator + status MUST exist before the
+# receipt is printed) and checks this; every child-side/heartbeat/trap call
+# site appends `|| true` for best-effort semantics.
 write_status() {
   local state="$1"
   local exit_code="${2:-}"
   local verdict="${3:-}"
   python3 - "$STATUS_FILE" "$state" "$PROVIDER" "$MODE" "$LOG_FILE" \
     "$exit_code" "$verdict" "${OWNER_PID:-}" "${LAUNCHED_AT_EPOCH:-}" \
-    "${DETACH_METHOD:-}" <<'PY' || true
+    "${DETACH_METHOD:-}" <<'PY'
 import json, os, sys, time
 
 (path, state, provider, mode, log_path,
@@ -417,11 +421,22 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
   # safe — and for the same reason the child MUST inherit the chosen method
   # via FRESHEYES_DETACH_METHOD (setsid env prefix / --setenv above): its
   # own writes would otherwise clobber the field back to "setsid".
-  write_status "launching" "" ""
+  # The parent's launching write is its contract with the poller: FRESHPID=
+  # must never be printed when the locator/status trail failed to appear
+  # (python3 missing, ENOSPC, ...), so this write fails LOUD, unlike the
+  # best-effort child-side writes.
+  _write_launching_or_die() {
+    if ! write_status "launching" "" ""; then
+      echo "Error: failed to write the initial status file: $STATUS_FILE" >&2
+      echo "Cannot hand off a trackable detached review; nothing was launched." >&2
+      exit 1
+    fi
+  }
+  _write_launching_or_die
   if [[ "$DETACH_METHOD" == "systemd-run" ]]; then
     if ! launch_via_systemd_run; then
       DETACH_METHOD="setsid"
-      write_status "launching" "" ""
+      _write_launching_or_die
     fi
   fi
   if [[ "$DETACH_METHOD" == "setsid" ]]; then
@@ -538,7 +553,7 @@ PY
 }
 
 log_event "info" "review_started" "Fresh Eyes review starting."
-write_status "running" "" ""
+write_status "running" "" "" || true
 
 echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please wait patiently." >&2
 
@@ -778,9 +793,9 @@ PY
   set -e
   _stop_heartbeat
   if [[ "$status" -eq 0 ]]; then
-    write_status "complete" "$status" "approved"
+    write_status "complete" "$status" "approved" || true
   else
-    write_status "failed" "$status" "not_approved"
+    write_status "failed" "$status" "not_approved" || true
   fi
   FINAL_STATUS_WRITTEN="1"
 
@@ -797,7 +812,7 @@ case "$PROVIDER" in
 esac
 
 _stop_heartbeat
-write_status "complete" "0" "$(manual_verdict_from_log 2>/dev/null || true)"
+write_status "complete" "0" "$(manual_verdict_from_log 2>/dev/null || true)" || true
 FINAL_STATUS_WRITTEN="1"
 
 # Output log file path AFTER review (so agents don't check it mid-stream)
