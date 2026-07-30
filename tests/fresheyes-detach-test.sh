@@ -407,6 +407,36 @@ test_launching_state_is_calm() {
   assert_contains "$(json_field "$output" "message")" "poll again in ~15s" "launching message"
 }
 
+# --- forwarded provider binary: cheap re-check in the daemonized child
+test_forwarded_bin_cheap_recheck() {
+  local log_dir="$TEST_TMP/logs-bin"
+  mkdir -p "$log_dir"
+  # Daemonized child with a bogus forwarded binary must fail loudly.
+  local rc
+  set +e
+  FRESHEYES_DAEMONIZED=1 FRESHEYES_CLAUDE_BIN="$TEST_TMP/does-not-exist" \
+    launch "$log_dir" "$RUNNER" --claude "review HEAD" >/dev/null 2>"$TEST_TMP/bin-err.txt"
+  rc=$?
+  set -e
+  [[ "$rc" -ne 0 ]] || fail "bogus forwarded binary must fail"
+  assert_contains "$(cat "$TEST_TMP/bin-err.txt")" "not executable" "cheap re-check message"
+
+  # A valid forwarded binary is used directly: strip the fake bin from PATH
+  # and rely solely on FRESHEYES_CLAUDE_BIN. Version re-parsing is skipped.
+  TMPDIR="$TEST_TMP" \
+  FRESHEYES_LOG_DIR="$log_dir" FRESHEYES_GLOBAL_LOG_DIR="$log_dir" \
+  FRESHEYES_CLAUDE_MODEL="" FRESHEYES_GPT_MODEL="" FRESHEYES_MODEL="" \
+  FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="20260729-130000-abcdef" \
+  FRESHEYES_LOG_FILE="$log_dir/fresheyes-20260729-130000-abcdef.log" \
+  FRESHEYES_CLAUDE_BIN="$FAKE_BIN/claude" \
+    timeout 30s bash "$RUNNER" --claude "review HEAD" >/dev/null \
+    || fail "forwarded valid binary should run the review without PATH"
+  local status="$log_dir/fresheyes-20260729-130000-abcdef.log.status.json"
+  local final_state
+  final_state=$(json_field "$(cat "$status")" "state")
+  [[ "$final_state" == "complete" ]] || fail "forwarded-bin review state: $final_state"
+}
+
 # --- (f) progress never writes, across every state
 test_progress_read_only_all_states() {
   for dir in "$TEST_TMP"/logs-*; do
@@ -443,6 +473,7 @@ test_killed_at_launch_crashed_variant
 test_died_midreview
 test_unknown_handle
 test_launching_state_is_calm
+test_forwarded_bin_cheap_recheck
 test_progress_read_only_all_states
 
 printf 'fresheyes-detach tests passed\n'

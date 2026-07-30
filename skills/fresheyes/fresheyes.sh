@@ -106,58 +106,78 @@ PY
 
 # --- CLI prerequisite check ---
 if [[ "$PROVIDER" == "gpt" ]]; then
-  if ! command -v codex &> /dev/null; then
-    echo "Error: codex CLI not found." >&2
-    echo "Install it with: npm install -g @openai/codex" >&2
-    exit 1
-  fi
+  if [[ "${FRESHEYES_DAEMONIZED:-0}" == "1" && -n "${FRESHEYES_CODEX_BIN:-}" ]]; then
+    # Parent already validated the CLI + version; cheap re-check only.
+    if [[ ! -x "$FRESHEYES_CODEX_BIN" ]]; then
+      echo "Error: forwarded codex binary '$FRESHEYES_CODEX_BIN' is not executable." >&2
+      exit 1
+    fi
+    CODEX_BIN="$FRESHEYES_CODEX_BIN"
+  else
+    if ! command -v codex &> /dev/null; then
+      echo "Error: codex CLI not found." >&2
+      echo "Install it with: npm install -g @openai/codex" >&2
+      exit 1
+    fi
 
-  if [[ "$MODEL" == gpt-5.6* ]]; then
-    MINIMUM_CODEX_VERSION="0.144.0"
-    if ! CODEX_VERSION_OUTPUT="$(codex --version 2>&1)"; then
-      echo "Error: unable to determine the Codex CLI version." >&2
-      echo "Update it with: npm install -g @openai/codex@latest" >&2
-      exit 1
+    if [[ "$MODEL" == gpt-5.6* ]]; then
+      MINIMUM_CODEX_VERSION="0.144.0"
+      if ! CODEX_VERSION_OUTPUT="$(codex --version 2>&1)"; then
+        echo "Error: unable to determine the Codex CLI version." >&2
+        echo "Update it with: npm install -g @openai/codex@latest" >&2
+        exit 1
+      fi
+      if [[ "$CODEX_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
+        CODEX_VERSION="${BASH_REMATCH[1]}"
+      else
+        echo "Error: unable to parse the Codex CLI version from: $CODEX_VERSION_OUTPUT" >&2
+        echo "Update it with: npm install -g @openai/codex@latest" >&2
+        exit 1
+      fi
+      if ! version_at_least "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION"; then
+        echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
+        echo "Update it with: npm install -g @openai/codex@latest" >&2
+        exit 1
+      fi
     fi
-    if [[ "$CODEX_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
-      CODEX_VERSION="${BASH_REMATCH[1]}"
-    else
-      echo "Error: unable to parse the Codex CLI version from: $CODEX_VERSION_OUTPUT" >&2
-      echo "Update it with: npm install -g @openai/codex@latest" >&2
-      exit 1
-    fi
-    if ! version_at_least "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION"; then
-      echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
-      echo "Update it with: npm install -g @openai/codex@latest" >&2
-      exit 1
-    fi
+    CODEX_BIN="$(command -v codex)"
   fi
 elif [[ "$PROVIDER" == "claude" ]]; then
-  if ! command -v claude &> /dev/null; then
-    echo "Error: claude CLI not found." >&2
-    echo "Install it with: npm install -g @anthropic-ai/claude-code" >&2
-    exit 1
-  fi
+  if [[ "${FRESHEYES_DAEMONIZED:-0}" == "1" && -n "${FRESHEYES_CLAUDE_BIN:-}" ]]; then
+    # Parent already validated the CLI + version; cheap re-check only.
+    if [[ ! -x "$FRESHEYES_CLAUDE_BIN" ]]; then
+      echo "Error: forwarded claude binary '$FRESHEYES_CLAUDE_BIN' is not executable." >&2
+      exit 1
+    fi
+    CLAUDE_BIN="$FRESHEYES_CLAUDE_BIN"
+  else
+    if ! command -v claude &> /dev/null; then
+      echo "Error: claude CLI not found." >&2
+      echo "Install it with: npm install -g @anthropic-ai/claude-code" >&2
+      exit 1
+    fi
 
-  if [[ "$MODEL" == claude-fable-5* ]]; then
-    MINIMUM_CLAUDE_VERSION="2.1.170"
-    if ! CLAUDE_VERSION_OUTPUT="$(claude --version 2>&1)"; then
-      echo "Error: unable to determine the Claude Code version." >&2
-      echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
-      exit 1
+    if [[ "$MODEL" == claude-fable-5* ]]; then
+      MINIMUM_CLAUDE_VERSION="2.1.170"
+      if ! CLAUDE_VERSION_OUTPUT="$(claude --version 2>&1)"; then
+        echo "Error: unable to determine the Claude Code version." >&2
+        echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
+        exit 1
+      fi
+      if [[ "$CLAUDE_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
+        CLAUDE_VERSION="${BASH_REMATCH[1]}"
+      else
+        echo "Error: unable to parse the Claude Code version from: $CLAUDE_VERSION_OUTPUT" >&2
+        echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
+        exit 1
+      fi
+      if ! version_at_least "$CLAUDE_VERSION" "$MINIMUM_CLAUDE_VERSION"; then
+        echo "Error: Claude Fable 5 requires Claude Code $MINIMUM_CLAUDE_VERSION or newer; found $CLAUDE_VERSION." >&2
+        echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
+        exit 1
+      fi
     fi
-    if [[ "$CLAUDE_VERSION_OUTPUT" =~ ([0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?) ]]; then
-      CLAUDE_VERSION="${BASH_REMATCH[1]}"
-    else
-      echo "Error: unable to parse the Claude Code version from: $CLAUDE_VERSION_OUTPUT" >&2
-      echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
-      exit 1
-    fi
-    if ! version_at_least "$CLAUDE_VERSION" "$MINIMUM_CLAUDE_VERSION"; then
-      echo "Error: Claude Fable 5 requires Claude Code $MINIMUM_CLAUDE_VERSION or newer; found $CLAUDE_VERSION." >&2
-      echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
-      exit 1
-    fi
+    CLAUDE_BIN="$(command -v claude)"
   fi
 fi
 
@@ -331,6 +351,7 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
   write_status "launching" "" ""
   FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
   FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
+  FRESHEYES_CODEX_BIN="${CODEX_BIN:-}" FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-}" \
     setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
   echo "FRESHPID=$HANDLE"
   echo "NEXT: bash $SCRIPT_DIR/fresheyes-progress.sh --json $HANDLE   (reviews take 5-30 min; poll every 30-60s)"
@@ -455,7 +476,7 @@ CLAUDE_TOOLS='Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep'
 CLAUDE_STREAM_PARSER="$SCRIPT_DIR/fresheyes-claude-stream.py"
 
 run_gpt_manual() {
-  if ! codex exec \
+  if ! "$CODEX_BIN" exec \
     --sandbox read-only \
     --color never \
     --model "$MODEL" \
@@ -476,7 +497,7 @@ run_gpt_manual() {
 run_gpt_automatic() {
   local output_file="$1"
   # Codex writes schema-conforming JSON directly to the output file — no post-processing needed.
-  if ! codex exec \
+  if ! "$CODEX_BIN" exec \
     --sandbox read-only \
     --color never \
     --model "$MODEL" \
@@ -493,7 +514,7 @@ run_gpt_automatic() {
 
 run_claude_manual() {
   log_event "info" "provider_started" "Claude manual review started."
-  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
+  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT "$CLAUDE_BIN" -p \
     --model "$MODEL" \
     --effort "$REASONING_EFFORT" \
     --output-format stream-json \
@@ -523,7 +544,7 @@ run_claude_automatic() {
   json_schema=$(cat "$SCHEMA_FILE")
 
   log_event "info" "provider_started" "Claude automatic review started."
-  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT claude -p \
+  if ! env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT "$CLAUDE_BIN" -p \
     --model "$MODEL" \
     --effort "$REASONING_EFFORT" \
     --output-format stream-json \
