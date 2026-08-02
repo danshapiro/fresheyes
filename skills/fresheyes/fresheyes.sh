@@ -553,8 +553,12 @@ CLAUDE_TOOLS='Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep'
 CLAUDE_STREAM_PARSER="$SCRIPT_DIR/fresheyes-claude-stream.py"
 
 run_gpt_manual() {
+  # --skip-git-repo-check: codex exec aborts when its working directory is not
+  # inside a git repo. Reviews run read-only and the scope names its own repo
+  # (often via `git -C`), so the caller's CWD must not gate the review.
   if ! "$CODEX_BIN" exec \
     --sandbox read-only \
+    --skip-git-repo-check \
     --color never \
     --model "$MODEL" \
     -c features.shell_snapshot=false \
@@ -576,6 +580,7 @@ run_gpt_automatic() {
   # Codex writes schema-conforming JSON directly to the output file — no post-processing needed.
   if ! "$CODEX_BIN" exec \
     --sandbox read-only \
+    --skip-git-repo-check \
     --color never \
     --model "$MODEL" \
     -c features.shell_snapshot=false \

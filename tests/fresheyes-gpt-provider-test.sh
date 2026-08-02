@@ -83,6 +83,8 @@ if "model_reasoning_effort=xhigh" not in argv:
     raise SystemExit(f"manual GPT review did not use xhigh reasoning: {argv!r}")
 if "-o" not in argv:
     raise SystemExit(f"manual GPT review did not request a last-message artifact: {argv!r}")
+if "--skip-git-repo-check" not in argv:
+    raise SystemExit(f"manual GPT review must skip the codex git-repo trust check: {argv!r}")
 PY
 
 if ! grep -q '^INDEPENDENT CODE REVIEW PASSED$' "$STDOUT_FILE"; then
@@ -182,6 +184,8 @@ if "model_reasoning_effort=medium" not in argv:
     raise SystemExit(f"automatic GPT review did not use medium reasoning: {argv!r}")
 if "--output-schema" not in argv or "-o" not in argv:
     raise SystemExit(f"automatic GPT review did not request structured output: {argv!r}")
+if "--skip-git-repo-check" not in argv:
+    raise SystemExit(f"automatic GPT review must skip the codex git-repo trust check: {argv!r}")
 PY
 
 if ! grep -q '^Fresh Eyes: approved\.$' "$AUTOMATIC_STDOUT_FILE"; then
