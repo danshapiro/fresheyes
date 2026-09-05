@@ -30,9 +30,9 @@ npm install -g @openai/codex@latest
 npm install -g @anthropic-ai/claude-code@latest
 ```
 
-GPT-5.6 requires Codex CLI 0.144.0 or newer. Manual GPT reviews use GPT-5.6 Sol with Extra High reasoning by default; automatic reviews use Sol with Medium reasoning. Sol requires a Plus or higher Codex plan. On Free or Go, add `export FRESHEYES_GPT_MODEL=gpt-5.6-terra` to your shell profile so both manual and automatic reviews use the GPT-5.6 model available on those plans.
+GPT-6 Astra requires Codex CLI 0.153.1 or newer. Manual GPT reviews use GPT-6 Astra with Extra High reasoning by default; automatic reviews use Astra with Medium reasoning. Astra is rolling out to Pro, Business, and Enterprise plans first; if the default errors for you on Plus, add `export FRESHEYES_GPT_MODEL=gpt-5.6-sol` to your shell profile, and on Free or Go use `export FRESHEYES_GPT_MODEL=gpt-5.6-terra`, so both manual and automatic reviews use a GPT-5.6 model your plan includes.
 
-Claude Fable 5 requires Claude Code 2.1.170 or newer. Manual Claude reviews use Fable 5 with Extra High reasoning by default; automatic reviews use Fable 5 with Medium reasoning. Fable 5 is available to Pro, Max, Team, and Enterprise users, as well as through usage credits and API access.
+Claude Fable 5.1 requires Claude Code 2.1.257 or newer. Manual Claude reviews use Fable 5.1 with Extra High reasoning by default; automatic reviews use Fable 5.1 with Medium reasoning. Fable 5.1 is available to Pro, Max, Team, and Enterprise users, as well as through usage credits and API access.
 
 Note that Claude reviews count against your Claude overage, not your subscription _(shakes fist at universe)_.
 

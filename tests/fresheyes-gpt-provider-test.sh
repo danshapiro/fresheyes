@@ -25,8 +25,8 @@ import sys
 
 if sys.argv[1:] == ["--version"]:
     with open(os.environ["FRESHEYES_FAKE_VERSION_PROBE"], "w", encoding="utf-8") as handle:
-        handle.write(os.environ.get("FRESHEYES_FAKE_VERSION", "0.144.1"))
-    print(f"codex-cli {os.environ.get('FRESHEYES_FAKE_VERSION', '0.144.1')}")
+        handle.write(os.environ.get("FRESHEYES_FAKE_VERSION", "0.153.4"))
+    print(f"codex-cli {os.environ.get('FRESHEYES_FAKE_VERSION', '0.153.4')}")
     raise SystemExit(0)
 
 with open(os.environ["FRESHEYES_FAKE_ARGV"], "w", encoding="utf-8") as handle:
@@ -63,7 +63,7 @@ PATH="$FAKE_BIN:$PATH" \
   timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$STDOUT_FILE"
 
 if [[ ! -s "$VERSION_PROBE_FILE" ]]; then
-  printf 'GPT-5.6 review did not verify the Codex CLI version\n' >&2
+  printf 'GPT-6 review did not verify the Codex CLI version\n' >&2
   exit 1
 fi
 
@@ -76,8 +76,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 model_index = argv.index("--model")
 actual_model = argv[model_index + 1]
-if actual_model != "gpt-5.6-sol":
-    raise SystemExit(f"expected default GPT model gpt-5.6-sol, got {actual_model!r}")
+if actual_model != "gpt-6-astra":
+    raise SystemExit(f"expected default GPT model gpt-6-astra, got {actual_model!r}")
 
 if "model_reasoning_effort=xhigh" not in argv:
     raise SystemExit(f"manual GPT review did not use xhigh reasoning: {argv!r}")
@@ -117,18 +117,20 @@ assert_unsupported_version() {
   set -e
 
   if [[ "$status" -eq 0 ]]; then
-    printf 'GPT-5.6 review accepted unsupported Codex CLI %s\n' "$version" >&2
+    printf 'GPT-6 review accepted unsupported Codex CLI %s\n' "$version" >&2
     exit 1
   fi
-  if ! grep -q 'GPT-5.6 requires Codex CLI 0.144.0 or newer' "$stderr_file"; then
+  if ! grep -q 'GPT-6 requires Codex CLI 0.153.1 or newer' "$stderr_file"; then
     printf 'unsupported Codex CLI failure did not explain the minimum version:\n' >&2
     cat "$stderr_file" >&2
     exit 1
   fi
 }
 
-assert_unsupported_version "0.143.9"
-assert_unsupported_version "0.144.0-alpha.1"
+assert_unsupported_version "0.152.9"
+assert_unsupported_version "0.153.1-alpha.1"
+# Between the two gates: fine for a GPT-5.6 override, too old for the GPT-6 default.
+assert_unsupported_version "0.145.0"
 
 TERRA_ARGV_FILE="$TEST_TMP/codex-terra-argv.json"
 TERRA_STDOUT_FILE="$TEST_TMP/terra-stdout.txt"
@@ -155,6 +157,58 @@ if actual_model != "gpt-5.6-terra":
     raise SystemExit(f"expected GPT-specific model override to win, got {actual_model!r}")
 PY
 
+# A GPT-5.6 override keeps its own (older) minimum: 0.145.0 is too old for the
+# GPT-6 default but fine for Terra.
+TERRA_OLD_CLI_ARGV_FILE="$TEST_TMP/codex-terra-old-cli-argv.json"
+PATH="$FAKE_BIN:$PATH" \
+  FRESHEYES_FAKE_ARGV="$TERRA_OLD_CLI_ARGV_FILE" \
+  FRESHEYES_FAKE_VERSION="0.145.0" \
+  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+  FRESHEYES_LOG_DIR="$TEST_TMP/terra-old-cli-logs" \
+  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/terra-old-cli-global-logs" \
+  FRESHEYES_GPT_MODEL="gpt-5.6-terra" \
+  FRESHEYES_MODEL= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > /dev/null
+
+python3 - "$TERRA_OLD_CLI_ARGV_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    argv = json.load(handle)
+model_index = argv.index("--model")
+if argv[model_index + 1] != "gpt-5.6-terra":
+    raise SystemExit(f"GPT-5.6 override on Codex CLI 0.145.0 did not run: {argv!r}")
+PY
+
+# ...but a GPT-5.6 model still enforces its own 0.144.0 floor.
+terra_gate_stdout="$TEST_TMP/terra-gate-stdout.txt"
+terra_gate_stderr="$TEST_TMP/terra-gate-stderr.txt"
+set +e
+PATH="$FAKE_BIN:$PATH" \
+  FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+  FRESHEYES_FAKE_VERSION="0.143.9" \
+  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+  FRESHEYES_LOG_DIR="$TEST_TMP/terra-gate-logs" \
+  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/terra-gate-global-logs" \
+  FRESHEYES_GPT_MODEL="gpt-5.6-terra" \
+  FRESHEYES_MODEL= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$terra_gate_stdout" 2> "$terra_gate_stderr"
+terra_gate_status=$?
+set -e
+
+if [[ "$terra_gate_status" -eq 0 ]]; then
+  printf 'GPT-5.6 override accepted unsupported Codex CLI 0.143.9\n' >&2
+  exit 1
+fi
+if ! grep -q 'GPT-5.6 requires Codex CLI 0.144.0 or newer' "$terra_gate_stderr"; then
+  printf 'GPT-5.6 override failure did not explain its minimum version:\n' >&2
+  cat "$terra_gate_stderr" >&2
+  exit 1
+fi
+
 AUTOMATIC_ARGV_FILE="$TEST_TMP/codex-automatic-argv.json"
 AUTOMATIC_STDOUT_FILE="$TEST_TMP/automatic-stdout.txt"
 PATH="$FAKE_BIN:$PATH" \
@@ -176,8 +230,8 @@ with open(sys.argv[1], encoding="utf-8") as handle:
 
 model_index = argv.index("--model")
 actual_model = argv[model_index + 1]
-if actual_model != "gpt-5.6-sol":
-    raise SystemExit(f"expected automatic GPT model gpt-5.6-sol, got {actual_model!r}")
+if actual_model != "gpt-6-astra":
+    raise SystemExit(f"expected automatic GPT model gpt-6-astra, got {actual_model!r}")
 if "model_reasoning_effort=medium" not in argv:
     raise SystemExit(f"automatic GPT review did not use medium reasoning: {argv!r}")
 if "--output-schema" not in argv or "-o" not in argv:

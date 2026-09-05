@@ -78,11 +78,11 @@ PROVIDER="${PROVIDER:-${FRESHEYES_PROVIDER:-gpt}}"
 
 case "$PROVIDER" in
   gpt)
-    MODEL="${FRESHEYES_GPT_MODEL:-${FRESHEYES_MODEL:-gpt-5.6-sol}}"
+    MODEL="${FRESHEYES_GPT_MODEL:-${FRESHEYES_MODEL:-gpt-6-astra}}"
     PROVIDER_LABEL="Codex"
     ;;
   claude)
-    MODEL="${FRESHEYES_CLAUDE_MODEL:-${FRESHEYES_MODEL:-claude-fable-5}}"
+    MODEL="${FRESHEYES_CLAUDE_MODEL:-${FRESHEYES_MODEL:-claude-fable-5-1}}"
     PROVIDER_LABEL="Claude"
     ;;
   *)
@@ -120,8 +120,13 @@ if [[ "$PROVIDER" == "gpt" ]]; then
       exit 1
     fi
 
-    if [[ "$MODEL" == gpt-5.6* ]]; then
-      MINIMUM_CODEX_VERSION="0.144.0"
+    MINIMUM_CODEX_VERSION=""
+    CODEX_MODEL_FAMILY=""
+    case "$MODEL" in
+      gpt-6*)   MINIMUM_CODEX_VERSION="0.153.1"; CODEX_MODEL_FAMILY="GPT-6" ;;
+      gpt-5.6*) MINIMUM_CODEX_VERSION="0.144.0"; CODEX_MODEL_FAMILY="GPT-5.6" ;;
+    esac
+    if [[ -n "$MINIMUM_CODEX_VERSION" ]]; then
       if ! CODEX_VERSION_OUTPUT="$(codex --version 2>&1)"; then
         echo "Error: unable to determine the Codex CLI version." >&2
         echo "Update it with: npm install -g @openai/codex@latest" >&2
@@ -135,7 +140,7 @@ if [[ "$PROVIDER" == "gpt" ]]; then
         exit 1
       fi
       if ! version_at_least "$CODEX_VERSION" "$MINIMUM_CODEX_VERSION"; then
-        echo "Error: GPT-5.6 requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
+        echo "Error: $CODEX_MODEL_FAMILY requires Codex CLI $MINIMUM_CODEX_VERSION or newer; found $CODEX_VERSION." >&2
         echo "Update it with: npm install -g @openai/codex@latest" >&2
         exit 1
       fi
@@ -157,8 +162,13 @@ elif [[ "$PROVIDER" == "claude" ]]; then
       exit 1
     fi
 
-    if [[ "$MODEL" == claude-fable-5* ]]; then
-      MINIMUM_CLAUDE_VERSION="2.1.170"
+    MINIMUM_CLAUDE_VERSION=""
+    CLAUDE_MODEL_FAMILY=""
+    case "$MODEL" in
+      claude-fable-5-1*) MINIMUM_CLAUDE_VERSION="2.1.257"; CLAUDE_MODEL_FAMILY="Claude Fable 5.1" ;;
+      claude-fable-5*)   MINIMUM_CLAUDE_VERSION="2.1.170"; CLAUDE_MODEL_FAMILY="Claude Fable 5" ;;
+    esac
+    if [[ -n "$MINIMUM_CLAUDE_VERSION" ]]; then
       if ! CLAUDE_VERSION_OUTPUT="$(claude --version 2>&1)"; then
         echo "Error: unable to determine the Claude Code version." >&2
         echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
@@ -172,7 +182,7 @@ elif [[ "$PROVIDER" == "claude" ]]; then
         exit 1
       fi
       if ! version_at_least "$CLAUDE_VERSION" "$MINIMUM_CLAUDE_VERSION"; then
-        echo "Error: Claude Fable 5 requires Claude Code $MINIMUM_CLAUDE_VERSION or newer; found $CLAUDE_VERSION." >&2
+        echo "Error: $CLAUDE_MODEL_FAMILY requires Claude Code $MINIMUM_CLAUDE_VERSION or newer; found $CLAUDE_VERSION." >&2
         echo "Update it with: npm install -g @anthropic-ai/claude-code@latest" >&2
         exit 1
       fi
