@@ -303,3 +303,24 @@ cell 2 PASSED: loud killed_at_launch with remediation
 e2e done. Record this transcript in tests/manual/SPIKE-RESULT.md and the commit body.
 E2E_EXIT=0
 ```
+
+## End-to-end re-run (2026-09-04, post model bump)
+
+Re-run after the Fable 5.1 / GPT-6 Astra default bump (the fake Claude version
+in codex-exec-e2e.sh was updated to 2.1.261 ahead of this run; a fresheyes
+review of the bump caught the stale 2.1.170 value, which made both cells fail
+at the new version gate before any locator was written).
+
+Machine: garageserver (Ubuntu 24.04), Codex CLI 0.153.4, model gpt-6-astra,
+reasoning effort xhigh.
+
+- cell 1 (systemd-run detach survives codex exec and completes): PASSED —
+  FRESHPID=20260904-202803-d5a914, owner 2009391 alive after codex exec
+  returned at 1788578890.33, polled to state=complete with verdict=passed.
+- cell 2 (bus absent -> setsid fallback -> harness kill -> killed_at_launch):
+  INCONCLUSIVE — the harness did not kill the setsid child on this run
+  (state=running at poll time). The killed_at_launch path remains covered
+  deterministically by tests/fresheyes-detach-test.sh (which passed in the
+  same change), and this cell deterministically exercised the setsid fallback
+  with FRESHEYES_CLAUDE_MODEL cleared (proving the new default clears the
+  2.1.257 gate).

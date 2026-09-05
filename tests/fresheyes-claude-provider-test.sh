@@ -452,6 +452,40 @@ test_fable_5_1_rejects_old_claude_code() {
   assert_contains "$(cat "$stderr_file")" "Claude Fable 5.1 requires Claude Code 2.1.257 or newer" "old Claude Code failure"
 }
 
+test_fable_5_1_accepts_exact_minimum() {
+  local run_tmp stdout_file stderr_file
+  run_tmp="$(mktemp -d "$TEST_TMP/boundary.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  stderr_file="$run_tmp/stderr.txt"
+  rm -f "$ARGV_FILE"
+
+  # Exact-boundary acceptance: the new minimum itself must pass (pins
+  # version_at_least and the floor constant against off-by-one).
+  if ! TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    FRESHEYES_CLAUDE_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_FAKE_CLAUDE_VERSION="2.1.257" \
+    FRESHEYES_FAKE_CLAUDE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file" 2> "$stderr_file"; then
+    printf 'Fable 5.1 rejected its exact minimum Claude Code 2.1.257. stderr:\n' >&2
+    cat "$stderr_file" >&2
+    exit 1
+  fi
+  "$PYTHON" - "$ARGV_FILE" <<'PY'
+import json
+import sys
+
+argv = json.load(open(sys.argv[1], encoding="utf-8"))
+model_idx = argv.index("--model")
+if argv[model_idx + 1] != "claude-fable-5-1":
+    raise SystemExit(f"boundary-version run did not use the default model: {argv!r}")
+PY
+}
+
 test_fable_5_override_keeps_its_own_gate() {
   local run_tmp stdout_file stderr_file status
   run_tmp="$(mktemp -d "$TEST_TMP/fable5-gate.XXXXXX")"
@@ -461,7 +495,7 @@ test_fable_5_override_keeps_its_own_gate() {
   # Claude Code 2.1.170 (exactly the Fable 5 minimum, below the Fable 5.1
   # minimum) runs a Fable 5 override fine.
   rm -f "$ARGV_FILE"
-  TMPDIR="$run_tmp" \
+  if ! TMPDIR="$run_tmp" \
     FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
     FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
     FRESHEYES_CLAUDE_MODEL="claude-fable-5" \
@@ -470,7 +504,11 @@ test_fable_5_override_keeps_its_own_gate() {
     FRESHEYES_FAKE_CLAUDE_VERSION_PROBE="$VERSION_PROBE_FILE" \
     PATH="$FAKE_BIN:$PATH" \
     FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
-    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file"
+    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file" 2> "$stderr_file"; then
+    printf 'Fable 5 override unexpectedly failed on Claude Code 2.1.170. stderr:\n' >&2
+    cat "$stderr_file" >&2
+    exit 1
+  fi
   assert_contains "$(cat "$stdout_file")" "INDEPENDENT CODE REVIEW PASSED" "Fable 5 override on Claude Code 2.1.170"
   "$PYTHON" - "$ARGV_FILE" <<'PY'
 import json
@@ -538,6 +576,7 @@ test_manual_detaches_by_default_and_completes
 test_manual_foreground_runs_synchronously
 test_automatic_mode_does_not_detach
 test_fable_5_1_rejects_old_claude_code
+test_fable_5_1_accepts_exact_minimum
 test_fable_5_override_keeps_its_own_gate
 test_claude_specific_model_override_wins
 

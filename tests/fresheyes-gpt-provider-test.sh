@@ -132,6 +132,31 @@ assert_unsupported_version "0.153.1-alpha.1"
 # Between the two gates: fine for a GPT-5.6 override, too old for the GPT-6 default.
 assert_unsupported_version "0.145.0"
 
+# Exact-boundary acceptance: the new minimum itself must pass (pins
+# version_at_least and the floor constant against off-by-one).
+BOUNDARY_ARGV_FILE="$TEST_TMP/codex-boundary-argv.json"
+PATH="$FAKE_BIN:$PATH" \
+  FRESHEYES_FAKE_ARGV="$BOUNDARY_ARGV_FILE" \
+  FRESHEYES_FAKE_VERSION="0.153.1" \
+  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+  FRESHEYES_LOG_DIR="$TEST_TMP/boundary-logs" \
+  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/boundary-global-logs" \
+  FRESHEYES_GPT_MODEL= \
+  FRESHEYES_MODEL= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > /dev/null
+
+python3 - "$BOUNDARY_ARGV_FILE" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    argv = json.load(handle)
+model_index = argv.index("--model")
+if argv[model_index + 1] != "gpt-6-astra":
+    raise SystemExit(f"boundary-version run did not use the default model: {argv!r}")
+PY
+
 TERRA_ARGV_FILE="$TEST_TMP/codex-terra-argv.json"
 TERRA_STDOUT_FILE="$TEST_TMP/terra-stdout.txt"
 PATH="$FAKE_BIN:$PATH" \

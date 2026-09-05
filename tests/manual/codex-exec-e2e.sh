@@ -18,7 +18,7 @@ cat > "$FAKE_BIN/claude" <<'FAKE'
 #!/usr/bin/env python3
 import json, os, sys, time
 if "--version" in sys.argv:
-    print(os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION", "2.1.170 (Claude Code)"))
+    print(os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION", "2.1.261 (Claude Code)"))
     sys.exit(0)
 # FRESHEYES_FAKE_DELAY (seconds) stretches the review; both cells below set
 # it to 30 and their assertions DEPEND on the review still being in flight
