@@ -324,3 +324,90 @@ reasoning effort xhigh.
   same change), and this cell deterministically exercised the setsid fallback
   with FRESHEYES_CLAUDE_MODEL cleared (proving the new default clears the
   2.1.257 gate).
+
+Verbatim transcript (ANSI color stripped):
+
+```
+e2e tmp: /tmp/fresheyes-e2e.Mi6qZF
+=== cell 1: systemd-run detach survives codex exec and completes ===
+OpenAI Codex v0.153.4
+--------
+workdir: /home/dan/code/fresheyes/.worktrees/review-fixes
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 01a06f9b-c130-7211-a7dd-98e0707a1bc4
+--------
+user
+Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: env PATH="/tmp/fresheyes-e2e.Mi6qZF/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-survive FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-survive FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes.sh --claude 'review HEAD'
+codex
+I'll run the command exactly as provided and return its stdout.
+exec
+/bin/bash -lc 'env PATH="/tmp/fresheyes-e2e.Mi6qZF/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-survive FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-survive FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes.sh --claude '"'review HEAD'" in /home/dan/code/fresheyes/.worktrees/review-fixes
+ succeeded in 125ms:
+FRESHPID=20260904-202803-d5a914
+NEXT: bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes-progress.sh --json 20260904-202803-d5a914   (reviews take 5-30 min; poll every 30-60s)
+
+FRESHPID=20260904-202803-d5a914
+NEXT: bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes-progress.sh --json 20260904-202803-d5a914   (reviews take 5-30 min; poll every 30-60s)
+tokens used
+8,138
+codex exec returned at: 1788578890.334266993
+handle: 20260904-202803-d5a914
+cell 1 survival proven: owner 2009391 alive after codex exec return (1788578890.334266993)
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=running
+poll: state=complete
+{"detach_method":"systemd-run","exit_code":0,"handle":"20260904-202803-d5a914","heartbeat_at":1788578913.931141,"last_log_mtime_epoch":1788578913,"last_provider_event":"result","launched_at":1788578883.0,"line_count":5,"log_path":"/tmp/fresheyes-e2e.Mi6qZF/logs-survive/fresheyes-20260904-202803-d5a914.log","mode":"manual","owner_pid":2009391,"owner_pid_state":"missing","pid":"20260904-202803-d5a914","pid_state":"unknown","provider":"claude","provider_events":2,"result_available":true,"runner_state":"complete","state":"complete","status_path":"/tmp/fresheyes-e2e.Mi6qZF/logs-survive/fresheyes-20260904-202803-d5a914.log.status.json","updated_at_epoch":1788578913.9311404,"verdict":"passed"}
+cell 1 PASSED: detached review survived codex exec (owner alive post-return) and completed
+
+=== cell 2: bus absent -> setsid fallback -> harness kill -> killed_at_launch ===
+OpenAI Codex v0.153.4
+--------
+workdir: /home/dan/code/fresheyes/.worktrees/review-fixes
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 01a06f9c-6498-7261-8ff9-10ce879b5e03
+--------
+user
+Run exactly this shell command with your shell tool and nothing else, then print its stdout verbatim: env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS PATH="/tmp/fresheyes-e2e.Mi6qZF/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-killed FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-killed FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes.sh --claude 'review HEAD'
+codex
+I'll run the command exactly as provided and print its stdout verbatim.
+exec
+/bin/bash -lc 'env -u XDG_RUNTIME_DIR -u DBUS_SESSION_BUS_ADDRESS PATH="/tmp/fresheyes-e2e.Mi6qZF/bin:$PATH" FRESHEYES_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-killed FRESHEYES_GLOBAL_LOG_DIR=/tmp/fresheyes-e2e.Mi6qZF/logs-killed FRESHEYES_FAKE_DELAY=30 FRESHEYES_CLAUDE_MODEL= FRESHEYES_GPT_MODEL= FRESHEYES_MODEL= bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes.sh --claude '"'review HEAD'" in /home/dan/code/fresheyes/.worktrees/review-fixes
+ succeeded in 65ms:
+FRESHPID=20260904-202847-b2d1a1
+NEXT: bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes-progress.sh --json 20260904-202847-b2d1a1   (reviews take 5-30 min; poll every 30-60s)
+
+FRESHPID=20260904-202847-b2d1a1
+NEXT: bash /home/dan/code/fresheyes/.worktrees/review-fixes/skills/fresheyes/fresheyes-progress.sh --json 20260904-202847-b2d1a1   (reviews take 5-30 min; poll every 30-60s)
+tokens used
+8,087
+handle: 20260904-202847-b2d1a1
+poll output: {"detach_method":"setsid","handle":"20260904-202847-b2d1a1","heartbeat_at":1788578947.7856374,"last_log_mtime_epoch":1788578927,"last_provider_event":"system","launched_at":1788578927.0,"line_count":0,"log_path":"/tmp/fresheyes-e2e.Mi6qZF/logs-killed/fresheyes-20260904-202847-b2d1a1.log","mode":"manual","owner_pid":2043544,"owner_pid_state":"active","pid":"20260904-202847-b2d1a1","pid_state":"unknown","provider":"claude","provider_events":1,"result_available":false,"runner_state":"running","state":"running","status_path":"/tmp/fresheyes-e2e.Mi6qZF/logs-killed/fresheyes-20260904-202847-b2d1a1.log.status.json","updated_at_epoch":1788578927.727373}
+poll exit: 0
+cell 2 INCONCLUSIVE: the harness did not kill the setsid child on this run (running) — note it in the transcript; the killed_at_launch path is covered deterministically by tests/fresheyes-detach-test.sh
+
+e2e done. Record this transcript in tests/manual/SPIKE-RESULT.md and the commit body.
+E2E_EXIT=0
+```
