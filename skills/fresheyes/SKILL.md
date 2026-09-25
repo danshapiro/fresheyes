@@ -63,6 +63,8 @@ Run it as a plain foreground command:
 bash "<base-directory>/fresheyes.sh" [--gpt|--claude] "<scope from step 2>"
 ```
 
+`fresheyes.sh --help` prints the options and launches nothing. An unrecognized option or an empty scope is refused with exit 2, and nothing is launched. A scope that starts with `-` goes after `--`.
+
 Manual reviews detach automatically, so this returns within a couple of seconds and prints exactly two lines:
 
 ```
