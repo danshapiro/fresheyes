@@ -154,6 +154,47 @@ assert_unsupported_version "0.153.1-alpha.1"
 # Between the two gates: fine for a GPT-5.6 override, too old for the GPT-6 default.
 assert_unsupported_version "0.145.0"
 
+# GPT-6.1 has its own, higher floor: Codex CLI 0.159.1 added gpt-6.1-sol to
+# the bundled catalog, and an older CLI passes the GPT-6 gate only to fail
+# inside the review with a misleading "not supported when using Codex with a
+# ChatGPT account" 400. The precheck must name the real cause.
+assert_unsupported_61_version() {
+  local version="$1"
+  local slug="${version//[^0-9A-Za-z]/-}"
+  local stderr_file="$TEST_TMP/unsupported61-$slug-stderr.txt"
+  local status
+
+  set +e
+  PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    FRESHEYES_FAKE_VERSION="$version" \
+    FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+    FRESHEYES_LOG_DIR="$TEST_TMP/unsupported61-$slug-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/unsupported61-$slug-global-logs" \
+    FRESHEYES_GPT_MODEL=gpt-6.1-sol \
+    FRESHEYES_MODEL= \
+    FRESHEYES_REASONING= \
+    FRESHEYES_CODEX_IGNORE_USER_CONFIG= \
+    FRESHEYES_MODE=manual \
+    timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > /dev/null 2> "$stderr_file"
+  status=$?
+  set -e
+
+  if [[ "$status" -eq 0 ]]; then
+    printf 'GPT-6.1 review accepted unsupported Codex CLI %s\n' "$version" >&2
+    exit 1
+  fi
+  if ! grep -q 'GPT-6.1 requires Codex CLI 0.159.1 or newer' "$stderr_file"; then
+    printf 'unsupported Codex CLI failure for GPT-6.1 did not name its minimum version:\n' >&2
+    cat "$stderr_file" >&2
+    exit 1
+  fi
+}
+
+# Above the GPT-6 floor, below the GPT-6.1 one: the case the GPT-6 arm let through.
+assert_unsupported_61_version "0.157.1"
+assert_unsupported_61_version "0.159.1-alpha.1"
+
 # Exact-boundary acceptance: the new minimum itself must pass (pins
 # version_at_least and the floor constant against off-by-one).
 BOUNDARY_ARGV_FILE="$TEST_TMP/codex-boundary-argv.json"
