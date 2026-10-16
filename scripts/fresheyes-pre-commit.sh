@@ -40,7 +40,7 @@ if [[ ! -f "$hook_cmd" ]]; then
 fi
 
 if [[ -n "${FRESHEYES_SCOPE:-}" ]]; then
-  bash "$hook_cmd" --mode automatic "$FRESHEYES_SCOPE"
+  bash "$hook_cmd" --mode automatic -- "$FRESHEYES_SCOPE"
 else
   bash "$hook_cmd" --mode automatic
 fi
