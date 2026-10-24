@@ -747,6 +747,7 @@ _cleanup() {
     fi
   fi
   rm -f "$LOG_DIR/.active.$HANDLE"
+  remove_claude_git_guard
 }
 trap _cleanup EXIT
 
@@ -795,7 +796,7 @@ echo "Fresh Eyes [$$]: review starting. This may take up to 30 minutes, please w
 #   Claude:    --json-schema takes inline schema content; stream-json output is parsed into the
 #              same schema-conforming output file.
 
-CLAUDE_TOOLS='Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep'
+CLAUDE_TOOLS='Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(git status:*),Read,Glob,Grep'
 # The Claude reviewer is read-only. --allowedTools only pre-approves tools: it
 # removes none, and --dangerously-skip-permissions approves all the others, so
 # together they left Edit, Write and any shell command available. Each flag
@@ -810,6 +811,13 @@ CLAUDE_TOOLS='Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep'
 # Because settings do not load, neither do `apiKeyHelper` or an `env` block in
 # them: the reviewer needs a logged-in CLI.
 # Claude Code still runs its built-in read-only commands (ls, cat, pwd).
+# One Bash rule per command: Claude Code 2.1.310 reads the older comma-joined
+# `Bash(git diff:*,git show:*,...)` as a single literal prefix that never
+# matches, so git ran only where the CLI's own read-only check let it.
+# A matching rule approves every argument list, and `git diff --output=<file>`
+# writes a file, so the reviewer's `git` is fresheyes-git-guard.sh: a shim on
+# the front of its PATH, made per launch by make_claude_git_guard, that runs only
+# read-only subcommands and turns external diff and textconv helpers off.
 # The launch also sets GIT_OPTIONAL_LOCKS=0: without it a plain `git status`
 # rewrites .git/index, which is a write to the repository under review.
 # The review prompts ask for `timeout 300s` around slow commands. A wrapped
@@ -825,6 +833,27 @@ CLAUDE_RESTRICT_ARGS=(
   --append-system-prompt "$CLAUDE_SHELL_NOTE"
 )
 CLAUDE_STREAM_PARSER="$SCRIPT_DIR/fresheyes-claude-stream.py"
+CLAUDE_GIT_GUARD="$SCRIPT_DIR/fresheyes-git-guard.sh"
+CLAUDE_GUARD_DIR=""
+
+make_claude_git_guard() {
+  # The real git is resolved before the guard directory joins PATH. A missing
+  # git still gets a shim: the guard then refuses every call.
+  local real_git
+  real_git="$(command -v git || true)"
+  CLAUDE_GUARD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/fresheyes-git-guard.XXXXXX")"
+  printf '#!/bin/bash\nexec /bin/bash %q %q "$@"\n' "$CLAUDE_GIT_GUARD" "$real_git" > "$CLAUDE_GUARD_DIR/git"
+  chmod 755 "$CLAUDE_GUARD_DIR/git"
+}
+
+# Called as soon as the reviewer exits, before its result is delivered, and
+# again from _cleanup for a launch that never got that far.
+remove_claude_git_guard() {
+  if [[ -n "${CLAUDE_GUARD_DIR:-}" ]]; then
+    rm -rf "${CLAUDE_GUARD_DIR:?}"
+    CLAUDE_GUARD_DIR=""
+  fi
+}
 
 # FRESHEYES_CODEX_IGNORE_USER_CONFIG=1 launches the Codex reviewer with
 # --ignore-user-config: no hooks, plugins, service tier or model overrides from
@@ -888,6 +917,7 @@ run_gpt_automatic() {
 
 run_claude_manual() {
   local status
+  make_claude_git_guard
   log_event "info" "provider_started" "Claude manual review started."
   # The parser prints the review once, at the end, and writes the same text to
   # --review-log on every branch. Its stdout is discarded and the review is
@@ -897,7 +927,8 @@ run_claude_manual() {
   # already printed.
   set +e
   env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT \
-    -u FRESHEYES_HANDLE -u FRESHEYES_LOG_FILE GIT_OPTIONAL_LOCKS=0 "$CLAUDE_BIN" -p \
+    -u FRESHEYES_HANDLE -u FRESHEYES_LOG_FILE GIT_OPTIONAL_LOCKS=0 \
+    PATH="$CLAUDE_GUARD_DIR:$PATH" "$CLAUDE_BIN" -p \
     --model "$MODEL" \
     --effort "$REASONING_EFFORT" \
     --output-format stream-json \
@@ -913,6 +944,7 @@ run_claude_manual() {
       --stream-log "$STREAM_LOG" > /dev/null
   status=$?
   set -e
+  remove_claude_git_guard
 
   enforce_result_handle "$LOG_FILE" manual
 
@@ -941,6 +973,7 @@ run_claude_automatic() {
   json_schema=$(cat "$SCHEMA_FILE")
 
   local status
+  make_claude_git_guard
   log_event "info" "provider_started" "Claude automatic review started."
   # Same deferral as the manual path, and for a sharper reason: the parser
   # handles an is_error event before structured output exists at all, printing
@@ -952,7 +985,8 @@ run_claude_automatic() {
   # a handle failure and throw away the diagnostic that says what went wrong.
   set +e
   env -u ANTHROPIC_API_KEY -u CLAUDE_CODE_ENTRYPOINT \
-    -u FRESHEYES_HANDLE -u FRESHEYES_LOG_FILE GIT_OPTIONAL_LOCKS=0 "$CLAUDE_BIN" -p \
+    -u FRESHEYES_HANDLE -u FRESHEYES_LOG_FILE GIT_OPTIONAL_LOCKS=0 \
+    PATH="$CLAUDE_GUARD_DIR:$PATH" "$CLAUDE_BIN" -p \
     --model "$MODEL" \
     --effort "$REASONING_EFFORT" \
     --output-format stream-json \
@@ -970,6 +1004,7 @@ run_claude_automatic() {
       --automatic-output "$output_file" > /dev/null
   status=$?
   set -e
+  remove_claude_git_guard
 
   enforce_result_handle "$LOG_FILE" automatic 1
 

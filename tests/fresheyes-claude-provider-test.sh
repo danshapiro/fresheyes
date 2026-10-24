@@ -57,8 +57,20 @@ if sys.argv[1:] == ["--version"]:
 argv_file = os.environ["FRESHEYES_FAKE_ARGV"]
 with open(argv_file, "w", encoding="utf-8") as handle:
     json.dump(sys.argv[1:], handle)
+# The reviewer's `git` must be the guard: try a write through it.
+import shutil
+import subprocess
+git_path = shutil.which("git") or ""
+pwned = argv_file + ".pwned"
+probe = subprocess.run(["git", "diff", "--output=" + pwned], capture_output=True, text=True)
 with open(argv_file + ".env", "w", encoding="utf-8") as handle:
-    json.dump({"GIT_OPTIONAL_LOCKS": os.environ.get("GIT_OPTIONAL_LOCKS")}, handle)
+    json.dump({
+        "GIT_OPTIONAL_LOCKS": os.environ.get("GIT_OPTIONAL_LOCKS"),
+        "git_path": git_path,
+        "git_output_rc": probe.returncode,
+        "git_output_stderr": probe.stderr,
+        "git_output_wrote": os.path.exists(pwned),
+    }, handle)
 
 mode = os.environ.get("FRESHEYES_FAKE_MODE")
 if not mode:
@@ -142,8 +154,10 @@ read_latest_file() {
 # The reviewer must be read-only. --allowedTools only pre-approves tools; it
 # removes none, and a bypass flag approves everything else. These assertions pin
 # the flags that do restrict, for every launch path (manual, automatic, detached).
+# Pass "running" while the review is still running: the guard directory is
+# removed only when the reviewer exits.
 assert_restricted_argv() {
-  "$PYTHON" - "$ARGV_FILE" <<'PY'
+  "$PYTHON" - "$ARGV_FILE" "${1:-finished}" <<'PY'
 import json
 import sys
 
@@ -168,7 +182,7 @@ def value_of(flag):
 
 expected = {
     "--tools": "Bash,Read,Glob,Grep",
-    "--allowedTools": "Bash(git diff:*,git show:*,git log:*,git status:*),Read,Glob,Grep",
+    "--allowedTools": "Bash(git diff:*),Bash(git show:*),Bash(git log:*),Bash(git status:*),Read,Glob,Grep",
     "--permission-mode": "dontAsk",
     "--setting-sources": "",
 }
@@ -189,6 +203,18 @@ if "timeout" not in value_of("--append-system-prompt"):
 # can produce the 0 seen here. Without it `git status` rewrites .git/index.
 if env.get("GIT_OPTIONAL_LOCKS") != "0":
     raise SystemExit(f"GIT_OPTIONAL_LOCKS was {env.get('GIT_OPTIONAL_LOCKS')!r} in the reviewer's environment, expected '0'")
+
+# The allow rules approve any `git diff` argument list, so the reviewer's git
+# must be the per-launch guard, which refuses --output, and the launch must
+# remove the guard's directory when it ends.
+import os
+git_path = env.get("git_path") or ""
+if "/fresheyes-git-guard." not in git_path:
+    raise SystemExit(f"the reviewer's git was {git_path!r}, not the fresheyes guard")
+if env.get("git_output_rc") != 128 or env.get("git_output_wrote"):
+    raise SystemExit(f"git diff --output= was not refused: {env!r}")
+if sys.argv[2] != "running" and os.path.exists(os.path.dirname(git_path)):
+    raise SystemExit(f"the guard directory outlived the review: {git_path!r}")
 PY
 }
 
@@ -474,7 +500,7 @@ test_manual_detaches_by_default_and_completes() {
     sleep 0.1
   done
   [[ -s "$ARGV_FILE.env" ]] || fail "detached provider never started: no argv was recorded"
-  assert_restricted_argv
+  assert_restricted_argv running
   # `ps -o sess=` prints 0 for every process on macOS, which would make self
   # and child compare equal and hide a real detach failure. getsid(2) answers
   # on both platforms, and python3 is already a prerequisite of this test.
@@ -503,6 +529,13 @@ except (OSError, ValueError):
     status=$?
     set -e
     if [[ "$status" -eq 0 && "$progress_output" == *"INDEPENDENT CODE REVIEW PASSED"* ]]; then
+      # The detached child removes the guard as its reviewer exits, which can
+      # be a moment after the result is readable.
+      for _ in {1..50}; do
+        assert_restricted_argv 2>/dev/null && return 0
+        sleep 0.1
+      done
+      assert_restricted_argv
       return 0
     fi
     sleep 0.1
