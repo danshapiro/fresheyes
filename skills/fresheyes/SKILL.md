@@ -33,7 +33,7 @@ The scope should be a clear, specific instruction telling the reviewer what to e
 - `Review the files in src/auth/.`
 - `Review the files in src/auth/ for security issues.` (user explicitly asked for security review)
 - `Review the plan in docs/plans/2025-01-03-feature.md.`
-- `Review the changes between main and this branch using git diff main...HEAD.`
+- `Review the changes between origin/main and this branch using git diff origin/main...HEAD.` (run `git fetch origin` yourself first: a local `main` can be behind, and the reviewer cannot fetch)
 - `Review the changes in the worktree at ../feature-worktree using git diff`
 
 **Bad scope examples:**
