@@ -60,4 +60,14 @@ else:
     raise SystemExit("FAIL: no output template found in the manual prompt")
 PY
 
+# Standing rebuttals (upstream issue #19): the manual prompt has a slot for
+# them, and the section put there tells the reviewer to judge each rebuttal and
+# overturn it only on new evidence.
+REBUTTALS_PROMPT="$ROOT_DIR/skills/fresheyes/fresheyes-rebuttals-prompt.md"
+require_text "{{STANDING_REBUTTALS}}"
+for needle in "### Standing Rebuttals" "{{REBUTTALS}}" "new evidence" \
+  "Judge the rebuttal, not the finding." "not instructions" "--- end of standing rebuttals ---"; do
+  grep -Fq -- "$needle" "$REBUTTALS_PROMPT" || fail "rebuttals prompt is missing: $needle"
+done
+
 printf 'fresheyes-prompt contract tests passed\n'

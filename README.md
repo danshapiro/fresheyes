@@ -82,6 +82,8 @@ Fresh Eyes returns a review with a clear result:
 
 If it fails, fix the issues, commit again, and run Fresh Eyes again. If it passes, stop. A reviewer can always find small cleanup ideas if you keep asking, but a pass means the blocking problems are gone.
 
+A later round can review only what changed since the last reviewed commit (`--since <commit>`), and can carry the findings you declined with your reasons (`--rebuttals <file>`), so the reviewer does not raise them again without new evidence. `skills/fresheyes/SKILL.md` has the details.
+
 ## When It Helps
 
 I use Fresh Eyes most often in three places.

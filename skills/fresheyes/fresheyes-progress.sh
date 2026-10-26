@@ -491,6 +491,8 @@ for key in (
     "heartbeat_at",
     "launched_at",
     "owner_pid",
+    "reviewed_base",
+    "reviewed_head",
 ):
     if key in status_data and key not in record:
         record[key] = status_data[key]

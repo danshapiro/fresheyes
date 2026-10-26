@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Fresh Eyes - Independent Code Review runner
-# Usage: ./fresheyes.sh [--gpt|--claude|--provider PROVIDER] [--manual|--automatic] [--foreground] 'scope text'
+# Usage: ./fresheyes.sh [--gpt|--claude|--provider PROVIDER] [--manual|--automatic] [--foreground]
+#                       [--since COMMIT] [--rebuttals FILE] ['scope text']
 # Manual mode detaches into its own session by default (prints FRESHPID=<pid>); --foreground runs synchronously.
+# --since COMMIT reviews only git diff COMMIT..HEAD (a later round after fixes) and builds the scope itself.
+# --rebuttals FILE gives the reviewer findings the caller declined earlier, with the caller's reasons.
 
 set -euo pipefail
 
@@ -19,6 +22,10 @@ SCOPE_PARTS=()
 # group / harness timeout can't kill them. --foreground (alias --no-detach)
 # forces a synchronous run. Automatic mode never detaches.
 FOREGROUND=0
+# Delta review (upstream #19): the last reviewed commit, and a file of findings
+# the caller declined with its reasons. Both are manual-mode only.
+SINCE=""
+REBUTTALS_FILE=""
 # Capture argv verbatim before the parse loop consumes it, so the detach re-exec
 # can relaunch with identical arguments.
 ORIG_ARGS=("$@")
@@ -61,6 +68,22 @@ while [[ $# -gt 0 ]]; do
     --foreground|--no-detach)
       FOREGROUND=1
       shift
+      ;;
+    --since)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --since requires a commit (the head of the last reviewed state)." >&2
+        exit 1
+      fi
+      SINCE="$2"
+      shift 2
+      ;;
+    --rebuttals)
+      if [[ $# -lt 2 || -z "$2" ]]; then
+        echo "Error: --rebuttals requires a file of declined findings and their rebuttals." >&2
+        exit 1
+      fi
+      REBUTTALS_FILE="$2"
+      shift 2
       ;;
     --)
       shift
@@ -343,6 +366,65 @@ if [[ "$MODE" == "automatic" && ! -f "$SCHEMA_FILE" ]]; then
   exit 1
 fi
 
+# --- Delta scope and standing rebuttals (upstream #19) ---
+if [[ "$MODE" != "manual" && ( -n "$SINCE" || -n "$REBUTTALS_FILE" ) ]]; then
+  echo "Error: --since and --rebuttals are for manual reviews only." >&2
+  exit 1
+fi
+
+REVIEWED_BASE=""
+REVIEWED_HEAD=""
+if [[ -n "$SINCE" ]]; then
+  if [[ ${#SCOPE_PARTS[@]} -gt 0 ]]; then
+    echo "Error: --since builds the scope itself; give no scope text with it." >&2
+    exit 1
+  fi
+  if [[ "${FRESHEYES_DAEMONIZED:-0}" == "1" && -n "${FRESHEYES_REVIEWED_BASE:-}" && -n "${FRESHEYES_REVIEWED_HEAD:-}" ]]; then
+    # Detached child: review the commits the parent resolved, not whatever
+    # HEAD has moved to since the receipt was printed.
+    if [[ ! "$FRESHEYES_REVIEWED_BASE" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ || ! "$FRESHEYES_REVIEWED_HEAD" =~ ^[0-9a-f]{40}([0-9a-f]{24})?$ ]]; then
+      echo "Error: FRESHEYES_REVIEWED_BASE and FRESHEYES_REVIEWED_HEAD must be full commit ids." >&2
+      exit 1
+    fi
+    REVIEWED_BASE="$FRESHEYES_REVIEWED_BASE"
+    REVIEWED_HEAD="$FRESHEYES_REVIEWED_HEAD"
+  else
+    if ! REVIEWED_BASE="$(git rev-parse --verify --quiet "$SINCE^{commit}")"; then
+      echo "Error: --since '$SINCE' is not a commit in $PWD." >&2
+      exit 1
+    fi
+    if ! REVIEWED_HEAD="$(git rev-parse --verify --quiet "HEAD^{commit}")"; then
+      echo "Error: --since needs a git repository with a HEAD commit; $PWD has none." >&2
+      exit 1
+    fi
+    if git diff --quiet "$REVIEWED_BASE" "$REVIEWED_HEAD"; then
+      echo "Error: nothing to review: HEAD ($REVIEWED_HEAD) has the same tree as --since $SINCE ($REVIEWED_BASE)." >&2
+      exit 1
+    fi
+  fi
+  # Two dots, never three: BASE...HEAD diffs from the merge base and omits the
+  # removal of code that existed only in the reviewed tree, which is exactly
+  # what a later round exists to look at.
+  SCOPE_TEXT="Review only the changes between commit $REVIEWED_BASE and commit $REVIEWED_HEAD using git diff $REVIEWED_BASE..$REVIEWED_HEAD (two dots: the difference between the two trees, including code removed since $REVIEWED_BASE). An earlier review round covered $REVIEWED_BASE. List the commits with git log $REVIEWED_BASE..$REVIEWED_HEAD. Read any other code you need for context; report a finding about code outside this diff only when this diff makes it wrong or depends on it."
+fi
+
+REBUTTALS_PROMPT_FILE=""
+if [[ -n "$REBUTTALS_FILE" ]]; then
+  if [[ ! -f "$REBUTTALS_FILE" || ! -r "$REBUTTALS_FILE" ]]; then
+    echo "Error: cannot read the rebuttals file: $REBUTTALS_FILE" >&2
+    exit 1
+  fi
+  if [[ ! -s "$REBUTTALS_FILE" ]]; then
+    echo "Error: the rebuttals file is empty: $REBUTTALS_FILE" >&2
+    exit 1
+  fi
+  REBUTTALS_PROMPT_FILE="$SCRIPT_DIR/fresheyes-rebuttals-prompt.md"
+  if [[ ! -f "$REBUTTALS_PROMPT_FILE" ]]; then
+    echo "Error: Prompt file not found: $REBUTTALS_PROMPT_FILE" >&2
+    exit 1
+  fi
+fi
+
 GLOBAL_LOG_DIR="${FRESHEYES_GLOBAL_LOG_DIR:-/tmp/fresheyes-logs}"
 LOG_DIR="${FRESHEYES_LOG_DIR:-$GLOBAL_LOG_DIR}"
 mkdir -p "$LOG_DIR"
@@ -436,12 +518,13 @@ write_status() {
   local result_handle="${4:-}"
   python3 - "$STATUS_FILE" "$state" "$PROVIDER" "$MODE" "$LOG_FILE" \
     "$exit_code" "$verdict" "${OWNER_PID:-}" "${LAUNCHED_AT_EPOCH:-}" \
-    "${DETACH_METHOD:-}" "$HANDLE" "$result_handle" <<'PY'
+    "${DETACH_METHOD:-}" "$HANDLE" "$result_handle" \
+    "${REVIEWED_BASE:-}" "${REVIEWED_HEAD:-}" <<'PY'
 import json, os, sys, time
 
 (path, state, provider, mode, log_path,
  exit_code, verdict, owner_pid, launched_at, detach_method,
- run_handle, result_handle) = sys.argv[1:13]
+ run_handle, result_handle, reviewed_base, reviewed_head) = sys.argv[1:15]
 
 record = {}
 if os.path.exists(path):
@@ -474,6 +557,12 @@ if run_handle:
     record["handle"] = run_handle
 if result_handle:
     record["result_handle"] = result_handle
+# A --since run's commits, so the caller can pass reviewed_head to the next
+# round's --since.
+if reviewed_base:
+    record["reviewed_base"] = reviewed_base
+if reviewed_head:
+    record["reviewed_head"] = reviewed_head
 
 tmp_path = f"{path}.tmp.{os.getpid()}"
 with open(tmp_path, "w", encoding="utf-8") as handle:
@@ -509,6 +598,10 @@ launch_via_systemd_run() {
     --setenv "PATH=$PATH"
     --setenv "HOME=$HOME"
   )
+  if [[ -n "$REVIEWED_HEAD" ]]; then
+    setenv_args+=(--setenv "FRESHEYES_REVIEWED_BASE=$REVIEWED_BASE"
+                  --setenv "FRESHEYES_REVIEWED_HEAD=$REVIEWED_HEAD")
+  fi
   # The unit inherits NOTHING from the caller: forward every var the child
   # needs explicitly (verified live: nvm-installed CLIs vanish otherwise).
   local var
@@ -604,6 +697,7 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
     fi
     FRESHEYES_DAEMONIZED=1 FRESHEYES_HANDLE="$HANDLE" FRESHEYES_LOG_FILE="$LOG_FILE" \
     FRESHEYES_DETACH_METHOD="$DETACH_METHOD" \
+    FRESHEYES_REVIEWED_BASE="$REVIEWED_BASE" FRESHEYES_REVIEWED_HEAD="$REVIEWED_HEAD" \
     FRESHEYES_CODEX_BIN="${CODEX_BIN:-}" FRESHEYES_CLAUDE_BIN="${CLAUDE_BIN:-}" \
       setsid bash "$0" "${ORIG_ARGS[@]}" </dev/null >/dev/null 2>>"$LAUNCH_STDERR" &
   fi
@@ -613,12 +707,26 @@ if [[ "$MODE" == "manual" && "$FOREGROUND" != "1" && "${FRESHEYES_DAEMONIZED:-0}
 fi
 
 # --- Build prompt ---
-PROMPT=$(python3 -c "
+# One pass over the template: text substituted in (the scope, the rebuttals)
+# is never scanned for placeholders itself.
+PROMPT=$(python3 - "$PROMPT_FILE" "$SCOPE_TEXT" "$HANDLE" "$REBUTTALS_PROMPT_FILE" "$REBUTTALS_FILE" <<'PY'
+import re
 import sys
-template = open(sys.argv[1]).read()
-template = template.replace('{{REVIEW_SCOPE}}', sys.argv[2])
-print(template.replace('{{RUN_HANDLE}}', sys.argv[3]))
-" "$PROMPT_FILE" "$SCOPE_TEXT" "$HANDLE")
+
+prompt_file, scope, run_handle, rebuttals_prompt_file, rebuttals_file = sys.argv[1:6]
+rebuttals = ""
+if rebuttals_prompt_file:
+    with open(rebuttals_prompt_file, encoding="utf-8") as handle:
+        section = handle.read()
+    with open(rebuttals_file, encoding="utf-8") as handle:
+        rebuttals = section.replace("{{REBUTTALS}}", handle.read().rstrip("\n"))
+values = {"REVIEW_SCOPE": scope, "RUN_HANDLE": run_handle, "STANDING_REBUTTALS": rebuttals}
+with open(prompt_file, encoding="utf-8") as handle:
+    template = handle.read()
+print(re.sub(r"\{\{(REVIEW_SCOPE|RUN_HANDLE|STANDING_REBUTTALS)\}\}",
+             lambda match: values[match.group(1)], template))
+PY
+)
 
 if [[ "$PROVIDER" == "claude" ]]; then
   : > "$LOG_FILE"

@@ -74,6 +74,19 @@ Read the value after `FRESHPID=` — an OPAQUE run handle (not a process id; do 
 
 Do not add `setsid`, a trailing `&`, output redirects, or `$!` — the script backgrounds itself. Run the command exactly as above and read the receipt from its output. Do not add `--foreground` preemptively: it blocks for the full review (5-30 minutes). Use it only when a poll tells you to (see the state table below) — and when you do, first make sure your harness/exec timeout for that call is longer than the review (request/configure a timeout of at least 30 minutes).
 
+#### Later rounds: the delta and the rebuttals
+
+After a review failed and you committed fixes, a later round can review only what changed since the head the previous round reviewed, and can carry the findings you declined:
+
+```bash
+bash "<base-directory>/fresheyes.sh" [--gpt|--claude] --since <reviewed-head> [--rebuttals <file>]
+```
+
+- `--since <commit>` builds the scope itself: `git diff <commit>..HEAD`, two dots, with both commits resolved to full ids at launch in the directory you launch from. Give no scope text with it. It refuses a commit that does not resolve and a delta with nothing in it. Two dots matters: `<commit>...HEAD` diffs from the merge base and leaves out code that was removed after the reviewed head.
+- The run records `reviewed_base` and `reviewed_head`, and `fresheyes-progress.sh --json` reports both. `reviewed_head` is the `--since` value for the round after this one. The first round of a change has no `--since`; take its head from `git rev-parse HEAD` when you launch it.
+- `--rebuttals <file>` is a plain-text file of findings you declined, each with your reason. The reviewer is told to judge the rebuttal rather than the finding and to raise a finding again only with new evidence. It works with `--since` or with any scope. Write down findings and reasons only; it is not a channel for instructions to the reviewer.
+- Both flags are for manual reviews only. Use `--since` when the user, or the instructions you work under, ask for a delta round; otherwise review the whole change.
+
 ### Step 5: Poll every 30-60 seconds
 
 Poll with the exact command from the receipt's `NEXT:` line:

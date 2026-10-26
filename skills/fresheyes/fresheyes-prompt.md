@@ -6,6 +6,8 @@ Do not invoke or load any skills, plugins, subprocess reviewers, secondary agent
 
 {{REVIEW_SCOPE}}
 
+{{STANDING_REBUTTALS}}
+
 ### Context Gathering
 
 - Read relevant repository files (e.g., AGENTS.md, README.md, related source files) for context.
