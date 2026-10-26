@@ -605,6 +605,147 @@ TEXT
   assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "record with no handle is still delivered"
 }
 
+ESCAPE_LEAK="ESCAPED-TARGET-TEXT"
+
+write_escape_target() {
+  local path="$1"
+  cat > "$path" <<TEXT
+## Files Examined
+
+- README.md
+
+$ESCAPE_LEAK
+
+INDEPENDENT CODE REVIEW PASSED
+TEXT
+}
+
+# Runs --result and --json for a handle that must resolve to nothing.
+assert_handle_refused() {
+  local handle="$1"
+  local label="$2"
+  local output status
+
+  set +e
+  output=$(run_progress --result "$handle" 2>&1)
+  status=$?
+  set -e
+  if [[ "$output" == *"$ESCAPE_LEAK"* ]]; then
+    fail "$label: --result delivered the escaping target: $output"
+  fi
+  assert_equals "$status" "5" "$label --result exit code"
+
+  set +e
+  output=$(run_progress --json "$handle")
+  status=$?
+  set -e
+  assert_equals "$status" "5" "$label --json exit code"
+  assert_json_field_equals "$output" "state" "unknown_handle" "$label --json state"
+}
+
+test_locator_dotdot_escape_is_refused() {
+  local handle="20260922-000000-dotdot"
+  mkdir -p "$LOG_DIR"
+  write_escape_target "$TEST_TMP/outside.md"
+  write_locator_alias "$handle" "$LOG_DIR/../outside.md"
+  assert_handle_refused "$handle" "locator .. escape"
+}
+
+test_locator_symlink_escape_is_refused() {
+  local handle="20260922-000000-symlnk"
+  mkdir -p "$LOG_DIR"
+  write_escape_target "$TEST_TMP/outside-link.md"
+  ln -s "$TEST_TMP/outside-link.md" "$LOG_DIR/fresheyes-link.log"
+  write_locator_alias "$handle" "$LOG_DIR/fresheyes-link.log"
+  assert_handle_refused "$handle" "locator symlink escape"
+}
+
+test_locator_sidecar_symlink_escape_is_refused() {
+  local handle="20260922-000000-sidecr"
+  local base="$LOG_DIR/fresheyes-$handle.log"
+  mkdir -p "$LOG_DIR"
+  write_escape_target "$TEST_TMP/outside-sidecar.md"
+  printf 'review output line\n' > "$base"
+  ln -s "$TEST_TMP/outside-sidecar.md" "$base.stderr"
+  write_locator_alias "$handle" "$base"
+  assert_handle_refused "$handle" "locator sidecar symlink escape"
+}
+
+test_glob_symlink_escape_is_refused() {
+  local pid
+  dead_pid pid
+  mkdir -p "$LOG_DIR"
+  write_escape_target "$TEST_TMP/outside-glob.md"
+  ln -s "$TEST_TMP/outside-glob.md" "$LOG_DIR/fresheyes-link-$pid.log"
+  assert_handle_refused "$pid" "legacy glob symlink escape"
+}
+
+test_ambiguous_glob_is_refused() {
+  local pid output
+  dead_pid pid
+  mkdir -p "$LOG_DIR"
+  write_escape_target "$LOG_DIR/fresheyes-gpt-$pid.log"
+  write_escape_target "$LOG_DIR/fresheyes-claude-$pid.log"
+  assert_handle_refused "$pid" "ambiguous legacy glob"
+
+  # One base with sidecars is not ambiguous: it still resolves.
+  rm -f "$LOG_DIR/fresheyes-claude-$pid.log"
+  printf '' > "$LOG_DIR/fresheyes-gpt-$pid.log.stderr"
+  output=$(run_progress --result "$pid")
+  assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "single legacy glob base resolves"
+}
+
+test_ambiguous_glob_across_roots_is_refused() {
+  local pid
+  dead_pid pid
+  mkdir -p "$LOG_DIR" "$GLOBAL_LOG_DIR"
+  write_escape_target "$LOG_DIR/fresheyes-gpt-$pid.log"
+  write_escape_target "$GLOBAL_LOG_DIR/fresheyes-claude-$pid.log"
+  assert_handle_refused "$pid" "ambiguous legacy glob across log roots"
+}
+
+# A root whose name contains another root's name plus a space is still a
+# distinct root: deduplication compares whole paths.
+test_ambiguous_glob_across_roots_with_spaces_is_refused() {
+  local pid output status
+  # Built from the resolved temp dir (macOS: /var -> /private/var), since that
+  # is the spelling the resolver compares.
+  local real_tmp
+  real_tmp=$(cd "$TEST_TMP" && pwd -P)
+  local spaced_global="$real_tmp/g"
+  local spaced_local="$real_tmp/l $spaced_global"
+  dead_pid pid
+  mkdir -p "$spaced_local" "$spaced_global"
+  write_escape_target "$spaced_local/fresheyes-gpt-$pid.log"
+  write_escape_target "$spaced_global/fresheyes-claude-$pid.log"
+
+  set +e
+  output=$(TMPDIR="$TEST_TMP" FRESHEYES_LOG_DIR="$spaced_local" FRESHEYES_GLOBAL_LOG_DIR="$spaced_global" bash "$PROGRESS_SCRIPT" --result "$pid" 2>&1)
+  status=$?
+  set -e
+  if [[ "$output" == *"$ESCAPE_LEAK"* ]]; then
+    fail "ambiguous glob across spaced roots: --result delivered one run's review: $output"
+  fi
+  assert_equals "$status" "5" "ambiguous glob across spaced roots exit code"
+}
+
+test_legacy_active_escape_is_refused() {
+  local output status
+  mkdir -p "$LOG_DIR"
+  write_escape_target "$TEST_TMP/outside-active.md"
+  write_legacy_active "$LOG_DIR/../outside-active.md"
+
+  set +e
+  output=$(run_progress --result 2>&1)
+  status=$?
+  set -e
+  if [[ "$output" == *"$ESCAPE_LEAK"* ]]; then
+    fail "legacy .active escape: --result delivered the escaping target: $output"
+  fi
+  assert_equals "$status" "5" "legacy .active escape --result exit code"
+  rm -f "$LOG_DIR/.active"
+}
+
 test_alive_claude_sidecars_missing_log
 test_alive_claude_sidecars_empty_log
 test_legacy_no_pid_preserves_numeric_progress
@@ -625,5 +766,13 @@ test_parent_alias_no_longer_resolves
 test_progress_is_read_only
 test_foreign_marker_is_refused
 test_record_without_handle_is_delivered
+test_locator_dotdot_escape_is_refused
+test_locator_symlink_escape_is_refused
+test_locator_sidecar_symlink_escape_is_refused
+test_glob_symlink_escape_is_refused
+test_ambiguous_glob_is_refused
+test_ambiguous_glob_across_roots_is_refused
+test_ambiguous_glob_across_roots_with_spaces_is_refused
+test_legacy_active_escape_is_refused
 
 printf 'fresheyes-progress tests passed\n'

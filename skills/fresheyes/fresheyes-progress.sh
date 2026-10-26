@@ -179,10 +179,35 @@ _tracker_path() {
   _base_from_related_path "$tracked_path"
 }
 
-_path_is_under_dir() {
-  local path="$1"
-  local dir="${2%/}"
-  [[ "$path" == "$dir"/* ]]
+# Containment is decided on RESOLVED paths. A string prefix match on the
+# tracked path lets `<dir>/../outside.md` through, and the later `-f` tests
+# follow symlinks, so `<dir>/fresheyes-x.log -> /anywhere` got through as well;
+# either way the target's text was delivered as the review. The base and
+# every sidecar this script reads from it must resolve inside a log root.
+_base_resolves_under() {
+  python3 - "$@" <<'PYPATH'
+import os
+import sys
+
+base = sys.argv[1]
+roots = []
+for candidate in sys.argv[2:]:
+    if candidate:
+        roots.append(os.path.realpath(candidate).rstrip(os.sep) + os.sep)
+
+def inside(path):
+    real = os.path.realpath(path)
+    return any(real.startswith(root) for root in roots)
+
+if not inside(base):
+    raise SystemExit(1)
+for suffix in (".events.jsonl", ".stream.jsonl", ".stderr", ".status.json",
+               ".launch.stderr", ".result.md"):
+    path = base + suffix
+    if os.path.lexists(path) and not inside(path):
+        raise SystemExit(1)
+raise SystemExit(0)
+PYPATH
 }
 
 _tracker_target_allowed() {
@@ -193,24 +218,14 @@ _tracker_target_allowed() {
     return 0
   fi
 
-  if _path_is_under_dir "$tracked_path" "$dir"; then
-    return 0
-  fi
-
-  if _path_is_under_dir "$tracked_path" "$GLOBAL_LOG_DIR"; then
-    return 0
-  fi
-
-  return 1
+  _base_resolves_under "$tracked_path" "$dir" "$GLOBAL_LOG_DIR"
 }
 
-_find_base_for_pid_in_dir() {
+_find_tracked_base_in_dir() {
   local dir="$1"
   local pid="$2"
   local tracker_file
   local tracked_path
-  local matches=()
-  local newest
 
   for tracker_file in "$dir/.active.$pid" "$dir/.locator.$pid"; do
     if tracked_path=$(_tracker_path "$tracker_file"); then
@@ -229,6 +244,15 @@ _find_base_for_pid_in_dir() {
       esac
     fi
   done
+  return 1
+}
+
+# Prints each distinct base the legacy fresheyes-*-<pid>.log glob matches.
+_glob_bases_in_dir() {
+  local dir="$1"
+  local pid="$2"
+  local matches=()
+  local match
 
   shopt -s nullglob
   matches=(
@@ -239,21 +263,18 @@ _find_base_for_pid_in_dir() {
   )
   shopt -u nullglob
 
-  if [[ ${#matches[@]} -eq 0 ]]; then
-    return 1
-  fi
-
-  newest=$(ls -t "${matches[@]}" 2>/dev/null | head -1)
-  if [[ -z "$newest" ]]; then
-    return 1
-  fi
-  _base_from_related_path "$newest"
+  for match in "${matches[@]}"; do
+    _base_from_related_path "$match"
+  done | sort -u
 }
 
 _find_base_for_pid() {
   local pid="$1"
   local dir
   local candidate_dirs=("$LOG_DIR")
+  local searched_dirs=()
+  local seen_real=()
+  local real seen
 
   if [[ "$GLOBAL_LOG_DIR" != "$LOG_DIR" ]]; then
     candidate_dirs+=("$GLOBAL_LOG_DIR")
@@ -262,15 +283,48 @@ _find_base_for_pid() {
     candidate_dirs+=("/tmp/claude-1000/fresheyes-logs")
   fi
 
+  # Two spellings of one directory (/tmp and /private/tmp on macOS) are one
+  # root; searching both would count each glob match twice.
   for dir in "${candidate_dirs[@]}"; do
     if [[ -d "$dir" ]]; then
-      if _find_base_for_pid_in_dir "$dir" "$pid"; then
-        return 0
-      fi
+      real=$(cd "$dir" 2>/dev/null && pwd -P) || continue
+      for seen in "${seen_real[@]+"${seen_real[@]}"}"; do
+        [[ "$seen" == "$real" ]] && continue 2
+      done
+      seen_real+=("$real")
+      searched_dirs+=("$dir")
     fi
   done
 
-  return 1
+  if [[ ${#searched_dirs[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  for dir in "${searched_dirs[@]}"; do
+    if _find_tracked_base_in_dir "$dir" "$pid"; then
+      return 0
+    fi
+  done
+
+  # Two runs whose names end in the same pid both match the glob, in one root
+  # or across roots. Taking either would let one run answer the other's poll,
+  # so an ambiguous glob resolves to nothing.
+  local found="" found_dir="" base
+  for dir in "${searched_dirs[@]}"; do
+    while IFS= read -r base; do
+      [[ -n "$base" ]] || continue
+      if [[ -n "$found" ]]; then
+        return 1
+      fi
+      found="$base"
+      found_dir="$dir"
+    done < <(_glob_bases_in_dir "$dir" "$pid")
+  done
+
+  if [[ -z "$found" ]] || ! _tracker_target_allowed "$found_dir" "$found"; then
+    return 1
+  fi
+  printf '%s\n' "$found"
 }
 
 _find_legacy_base() {
@@ -281,7 +335,10 @@ _find_legacy_base() {
 
   local active_path
   active_path=$(cat "$active_file" 2>/dev/null)
-  if [[ -n "$active_path" ]] && _related_file_exists "$active_path"; then
+  if [[ -z "$active_path" ]] || ! _tracker_target_allowed "$LOG_DIR" "$active_path"; then
+    return 1
+  fi
+  if _related_file_exists "$active_path"; then
     printf '%s\n' "$active_path"
     return 0
   fi
@@ -741,7 +798,7 @@ STATUS_RESULT_HANDLE=$(status_file_field "$LOG_FILE" "result_handle" 2>/dev/null
 #     the poller read that run's handle, compare it with that run's own marker,
 #     and deliver its review as this one's. No text has to be forged.
 #   - "$PID" with no exception. A handle also resolves through the glob in
-#     _find_base_for_pid_in_dir, which matches fresheyes-*-<pid>.log, so a
+#     _glob_bases_in_dir, which matches fresheyes-*-<pid>.log, so a
 #     caller may legitimately poll with a SUFFIX of the real handle, and
 #     comparing a correct marker against that suffix accuses a good review.
 # So: the polled handle, widened to the resolved file's name ONLY in the case the
