@@ -72,7 +72,8 @@ for row in sorted(rows):
 SNAPSHOT_PY
 }
 
-# Fake claude provider: emits a minimal valid stream and a PASSED verdict.
+# Fake claude provider: emits a minimal valid stream and a PASSED verdict
+# bound to the run's handle, which it reads from the prompt.
 # FRESHEYES_FAKE_DELAY (seconds) stretches the review for liveness tests.
 # FRESHEYES_FAKE_ARGV (path) records the review invocation's argv (one
 # element per line; --version probes are not recorded).
@@ -80,7 +81,7 @@ make_fake_claude() {
   cat > "$FAKE_BIN/claude" <<'FAKE'
 #!/usr/bin/env python3
 # fresheyes-detach-test-marker
-import json, os, sys, time
+import json, os, re, sys, time
 if "--version" in sys.argv:
     print(os.environ.get("FRESHEYES_FAKE_CLAUDE_VERSION", "2.1.283 (Claude Code)"))
     sys.exit(0)
@@ -92,7 +93,11 @@ delay = float(os.environ.get("FRESHEYES_FAKE_DELAY", "0"))
 print(json.dumps({"type": "system", "subtype": "init"}), flush=True)
 if delay:
     time.sleep(delay)
-review = "# Review\n\nAll good.\n\nINDEPENDENT CODE REVIEW PASSED\n"
+# The verdict counts only above this run's marker, as the prompt asks.
+handle = re.search(r"FRESHEYES-RUN:\s*(\S+)", sys.argv[-1])
+review = "# Review\n\nAll good.\n\nINDEPENDENT CODE REVIEW PASSED\nFRESHEYES-RUN: %s\n" % (
+    handle.group(1) if handle else ""
+)
 print(json.dumps({"type": "result", "subtype": "success", "result": review}), flush=True)
 FAKE
   chmod +x "$FAKE_BIN/claude"

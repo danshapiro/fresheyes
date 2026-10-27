@@ -168,6 +168,17 @@ else:
     )
     if behaviour == "own" and own_handle:
         review += "FRESHEYES-RUN: %s\n" % own_handle
+    if behaviour == "quote":
+        # Upstream #13: the reviewer quotes an earlier round's notes, verdict
+        # and run marker included, and leaves out a verdict of its own.
+        review = (
+            "## Files Examined\n- docs/reviews/round-1.md\n\n"
+            "## Issues Found\n- **minor** `docs/reviews/round-1.md:9` - the earlier round ended:\n\n"
+            "**INDEPENDENT CODE REVIEW FAILED**\n"
+            "FRESHEYES-RUN: 20260101-000000-aaaaaa\n\n"
+            "## Summary\nA review of this run's own scope.\n\n"
+            "---\nFRESHEYES-RUN: %s\n" % own_handle
+        )
 
 if out_path:
     with open(out_path, "w", encoding="utf-8") as handle:
@@ -247,6 +258,17 @@ else:
     )
     if behaviour == "own" and own_handle:
         review += "FRESHEYES-RUN: %s\n" % own_handle
+    if behaviour == "quote":
+        # Upstream #13: the reviewer quotes an earlier round's notes, verdict
+        # and run marker included, and leaves out a verdict of its own.
+        review = (
+            "## Files Examined\n- docs/reviews/round-1.md\n\n"
+            "## Issues Found\n- **minor** `docs/reviews/round-1.md:9` - the earlier round ended:\n\n"
+            "**INDEPENDENT CODE REVIEW FAILED**\n"
+            "FRESHEYES-RUN: 20260101-000000-aaaaaa\n\n"
+            "## Summary\nA review of this run's own scope.\n\n"
+            "---\nFRESHEYES-RUN: %s\n" % own_handle
+        )
     print("fake claude stderr line", file=sys.stderr, flush=True)
 
 emit({"type": "system", "subtype": "init", "session_id": "fake-session"})
@@ -573,6 +595,30 @@ assert_contains "$(cat "$OUT_FILE")" "INDEPENDENT CODE REVIEW PASSED" "unmarked 
 unmarked_handle="$(current_handle)" || fail "unmarked manual run: no run artifacts were written"
 run_progress unmarked-json --json "$unmarked_handle"
 assert_contains "$(cat "$OUT_FILE")" '"handle_verified":false' "unmarked manual run --json handle_verified"
+
+# Upstream #13 and #5: a verdict the reviewer quoted is not this run's verdict.
+# The result is this run's (its last run marker is its own), so it is delivered,
+# but the quoted FAILED must not be recorded as the run's verdict.
+for provider in gpt claude; do
+  new_case "quoted-verdict-$provider"
+  FAKE_BEHAVIOUR=quote run_fresheyes "quoted-verdict-$provider" --foreground "--$provider" --manual "Review docs/reviews."
+  assert_equals "$STATUS" "0" "$provider quoted verdict run exit status"
+  assert_contains "$(cat "$OUT_FILE")" "A review of this run's own scope." "$provider quoted verdict run delivers its review"
+  quoted_base="$(current_base)" || fail "$provider quoted verdict run: no run artifacts were written"
+  assert_equals "$(status_field "$quoted_base.status.json" state)" "complete" "$provider quoted verdict recorded state"
+  assert_equals "$(status_field "$quoted_base.status.json" verdict)" "" "$provider quoted verdict is not the run's verdict"
+  run_progress "quoted-verdict-$provider-json" --json "$(current_handle)"
+  assert_not_contains "$(cat "$OUT_FILE")" '"verdict"' "$provider quoted verdict --json"
+done
+
+# The control: the run's own verdict, bound to its own marker, is recorded.
+for provider in gpt claude; do
+  new_case "own-verdict-$provider"
+  FAKE_BEHAVIOUR=own run_fresheyes "own-verdict-$provider" --foreground "--$provider" --manual "Review calc.py."
+  assert_equals "$STATUS" "0" "$provider own verdict run exit status"
+  own_verdict_base="$(current_base)" || fail "$provider own verdict run: no run artifacts were written"
+  assert_equals "$(status_field "$own_verdict_base.status.json" verdict)" "passed" "$provider own verdict is recorded"
+done
 
 # A record written before this change carries neither field: deliver it.
 new_case legacy-record

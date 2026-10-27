@@ -644,13 +644,11 @@ HANDLE_CHECK_OK=0
 
 manual_verdict_from_log() {
   # The verdict is read from the file that IS the result — the same file the
-  # handle check and the caller's output use. One selection, not three.
-  local review_file="$LOG_FILE"
-  if [[ -s "$RESULT_PATH" ]]; then
-    review_file="$RESULT_PATH"
-  fi
+  # handle check and the caller's output use. One selection, not three. Never
+  # the transcript: it holds everything the reviewer read, quoted markers
+  # included (upstream #13). The handle binds the verdict to this run.
   # Shared with fresheyes-progress.sh: the one home for the verdict marker.
-  python3 "$SCRIPT_DIR/fresheyes-verdict.py" "$review_file" 2>/dev/null
+  python3 "$SCRIPT_DIR/fresheyes-verdict.py" "$RESULT_PATH" "$HANDLE" 2>/dev/null
 }
 
 # Ask the one home for the run marker whose review this file is.

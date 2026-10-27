@@ -308,25 +308,34 @@ line_count_or_zero() {
 # and symlinks walked out of, a fallback to the provider transcript, and an
 # identity a repointed locator could choose), so it is gone. Verification and
 # delivery still read ONE file — this one.
+#
+# With no readable provider in status.json, the sidecar still wins when it
+# exists: only a GPT manual run writes one, and its transcript quotes whatever
+# the reviewer read, verdict lines included (upstream #13).
 resolve_result_file() {
   local base="$1"
   local provider mode
   provider=$(status_file_field "$base" "provider" 2>/dev/null || true)
   mode=$(status_file_field "$base" "mode" 2>/dev/null || true)
-  if [[ "$provider" == "gpt" && "$mode" == "manual" && -s "$base.result.md" ]]; then
+  if [[ -s "$base.result.md" ]] && [[ -z "$provider" || ( "$provider" == "gpt" && "$mode" == "manual" ) ]]; then
     printf '%s\n' "$base.result.md"
     return 0
   fi
   printf '%s\n' "$base"
 }
 
+# detect_manual_verdict <base> [<run handle>]
 detect_manual_verdict() {
   local base="$1"
   local review_file
   # One selection site, with no fallback to the transcript: a verdict read from
   # provider stdout is a verdict from whatever the reviewer happened to read.
   review_file=$(resolve_result_file "$base")
-  python3 "$VERDICT_PARSER" "$review_file" 2>/dev/null
+  if [[ -n "${2:-}" ]]; then
+    python3 "$VERDICT_PARSER" "$review_file" "$2" 2>/dev/null
+  else
+    python3 "$VERDICT_PARSER" "$review_file" 2>/dev/null
+  fi
 }
 
 print_final_review_if_nonempty() {
@@ -809,17 +818,6 @@ sys.exit(0 if now - epoch < window else 1)
 PY
 }
 
-# Verdict extraction: status.json wins over raw-log regex (Codex logs can
-# contain verdict-shaped examples).
-VERDICT=""
-if [[ -n "$STATUS_STATE" ]]; then
-  if [[ "$STATUS_STATE" == "complete" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
-    VERDICT="$STATUS_VERDICT"
-  fi
-else
-  VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
-fi
-
 # Verify ONCE, before the state machine, so every terminal state knows whether
 # this run's result is its own — not only `complete`. A refusal whose terminal
 # status write failed leaves a stale `running` record, and the poller then
@@ -847,6 +845,23 @@ if [[ -n "$EXPECTED_HANDLE" ]]; then
   elif [[ "$HANDLE_VERIFIED" != "true" && -n "$STATUS_HANDLE" ]]; then
     WITHHOLD_STDERR=1
   fi
+fi
+
+# Verdict extraction: status.json wins over raw-log regex (Codex logs can
+# contain verdict-shaped examples). Without a readable status.json the poller
+# reads the verdict itself, after the handle check: a result that carries this
+# run's marker gets only the verdict bound to that marker (upstream #13). Any
+# other result is read as before — one with no marker is a legacy result, and
+# one with another run's marker reaches `complete` only to be refused below.
+VERDICT=""
+if [[ -n "$STATUS_STATE" ]]; then
+  if [[ "$STATUS_STATE" == "complete" && "$STATUS_VERDICT" =~ ^(passed|failed)$ ]]; then
+    VERDICT="$STATUS_VERDICT"
+  fi
+elif [[ "$_HANDLE_STATUS" == "0" ]]; then
+  VERDICT=$(detect_manual_verdict "$LOG_FILE" "$EXPECTED_HANDLE" 2>/dev/null || true)
+else
+  VERDICT=$(detect_manual_verdict "$LOG_FILE" 2>/dev/null || true)
 fi
 
 MESSAGE=""

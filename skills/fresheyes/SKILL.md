@@ -111,7 +111,7 @@ The state table in Step 5 is authoritative. Acting on each of the seven states:
 - **`launching` or `running`** → healthy; keep polling on the Step 5 cadence.
 - **`complete` + `verdict=passed`** → the review passed. Proceed to Step 7.
 - **`complete` + `verdict=failed`** → the review completed and found blocking issues. Proceed to Step 7.
-- **`complete` with no `verdict`** → the review finished but emitted no PASSED/FAILED marker. This is **not** a tool failure. Run Step 7 (`--result`): it returns the review text when the log has content, or a failure diagnostic when it does not. Report exactly what `--result` returns.
+- **`complete` with no `verdict`** → the review finished but emitted no PASSED/FAILED marker of its own: none at all, or none on the line just above its `FRESHEYES-RUN:` line (see Step 7). This is **not** a tool failure. Run Step 7 (`--result`): it returns the review text when the log has content, or a failure diagnostic when it does not. Report exactly what `--result` returns.
 - **`killed_at_launch`** → do what the `message` says: re-run the SAME launch command with `--foreground`, after making sure your harness/exec timeout for that call is longer than the review (5-30 min; request/configure at least 30 minutes).
 - **`died`** → relay the `message`. When the run's result could not be tied to this run, the message says so and names the log as text NOT to read back; otherwise it leads with the log path as evidence. Optionally re-run with `--foreground` (same timeout requirement as above).
 - **`unknown_handle`** → re-check the handle against the receipt's `FRESHPID=` line; if the handle is right, its trackers were removed (e.g. /tmp cleanup) — relaunch from Step 4.
@@ -149,6 +149,13 @@ review that quotes one of those lines AFTER its own marker is refused as a repla
 the run's own marker last, which is what the prompt asks for. An automatic-mode result
 is JSON and is read from its `run_handle` field, so quoting a marker there changes
 nothing.
+
+The verdict is bound the same way. In a text review it is the
+`INDEPENDENT CODE REVIEW PASSED` or `FAILED` line just above the run's own
+`FRESHEYES-RUN:` line, written flush left as a line of its own (bold or a heading is
+fine). A verdict the reviewer quoted from a file, an earlier review, or with indentation
+or line numbers is not read as this run's verdict, so a review whose own verdict line is
+missing or misplaced reports `complete` with no `verdict` rather than someone else's.
 
 ## Parallel reviews
 

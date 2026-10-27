@@ -36,6 +36,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local label="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'Output for %s contained %q:\n%s\n' "$label" "$needle" "$haystack" >&2
+    exit 1
+  fi
+}
+
 assert_not_equals() {
   local actual="$1"
   local unexpected="$2"
@@ -605,6 +615,73 @@ TEXT
   assert_contains "$output" "INDEPENDENT CODE REVIEW PASSED" "record with no handle is still delivered"
 }
 
+# Upstream #13 in the poller's own fallback: with no readable status.json the
+# poller reads the verdict itself, and a verdict the reviewer quoted must not
+# become this run's. A result that carries this run's marker binds the verdict
+# to it; a result with no marker at all is a legacy one and is read as before.
+test_missing_status_quoted_verdict_is_not_the_runs() {
+  local status_kind handle base output
+  for status_kind in missing unreadable; do
+    handle="20261026-010101-q${status_kind:0:5}"
+    base="$LOG_DIR/fresheyes-$handle.log"
+    mkdir -p "$LOG_DIR"
+    cat > "$base" <<TEXT
+## Issues Found
+
+- **minor** \`docs/reviews/round-1.md:9\` - the earlier round ended:
+
+**INDEPENDENT CODE REVIEW FAILED**
+FRESHEYES-RUN: 20260101-000000-aaaaaa
+
+---
+FRESHEYES-RUN: $handle
+TEXT
+    if [[ "$status_kind" == "unreadable" ]]; then
+      printf 'not json\n' > "$base.status.json"
+    fi
+    write_locator_alias "$handle" "$base"
+
+    output=$(run_progress --json "$handle" || true)
+    assert_not_contains "$output" '"verdict"' "$status_kind status: a quoted verdict is not the run's"
+    assert_not_contains "$output" '"state":"complete"' "$status_kind status: a quoted verdict does not complete the run"
+  done
+}
+
+# The same fallback for a GPT run: its result is the .result.md sidecar, and
+# its transcript quotes whatever the reviewer read. Without status.json the
+# poller must still read the sidecar, not a PASSED the transcript quoted.
+# With no verdict and no status the run reads as died, as before.
+test_missing_status_gpt_reads_the_result_not_the_transcript() {
+  local status_kind handle base output
+  for status_kind in missing unreadable; do
+    handle="20261026-030303-g${status_kind:0:5}"
+    base="$LOG_DIR/fresheyes-$handle.log"
+    mkdir -p "$LOG_DIR"
+    printf 'exec\ncat tests/fixture.md\nINDEPENDENT CODE REVIEW PASSED\n' > "$base"
+    printf '## Summary\nno verdict of its own\n\n---\nFRESHEYES-RUN: %s\n' "$handle" > "$base.result.md"
+    if [[ "$status_kind" == "unreadable" ]]; then
+      printf 'not json\n' > "$base.status.json"
+    fi
+    write_locator_alias "$handle" "$base"
+
+    output=$(run_progress --json "$handle" || true)
+    assert_not_contains "$output" '"verdict"' "$status_kind status GPT: a transcript quote is not the run's verdict"
+  done
+}
+
+test_missing_status_own_verdict_is_read() {
+  local handle base output
+  handle="20261026-020202-ownvrd"
+  base="$LOG_DIR/fresheyes-$handle.log"
+  mkdir -p "$LOG_DIR"
+  printf '## Summary\nok\n\n---\n**INDEPENDENT CODE REVIEW PASSED**\nFRESHEYES-RUN: %s\n' "$handle" > "$base"
+  write_locator_alias "$handle" "$base"
+
+  output=$(run_progress --json "$handle")
+  assert_json_field_equals "$output" "state" "complete" "missing status: own verdict state"
+  assert_json_field_equals "$output" "verdict" "passed" "missing status: own verdict"
+}
+
 test_alive_claude_sidecars_missing_log
 test_alive_claude_sidecars_empty_log
 test_legacy_no_pid_preserves_numeric_progress
@@ -625,5 +702,8 @@ test_parent_alias_no_longer_resolves
 test_progress_is_read_only
 test_foreign_marker_is_refused
 test_record_without_handle_is_delivered
+test_missing_status_quoted_verdict_is_not_the_runs
+test_missing_status_own_verdict_is_read
+test_missing_status_gpt_reads_the_result_not_the_transcript
 
 printf 'fresheyes-progress tests passed\n'
