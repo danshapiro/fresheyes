@@ -451,7 +451,7 @@ if os.path.exists(path):
     except Exception:
         record = {}
 
-record["severity"] = "error" if state in ("failed", "handle_mismatch") else "info"
+record["severity"] = "error" if state in ("failed", "handle_mismatch", "unreviewed") else "info"
 record["state"] = state
 record["provider"] = provider
 record["mode"] = mode
@@ -651,6 +651,17 @@ manual_verdict_from_log() {
   fi
   # Shared with fresheyes-progress.sh: the one home for the verdict marker.
   python3 "$SCRIPT_DIR/fresheyes-verdict.py" "$review_file" 2>/dev/null
+}
+
+# True when the review says it examined no files: the reviewer could not read
+# the repository, so the text is not a review whatever its verdict line says.
+# Read from the same file as the verdict, by the same helper.
+manual_examined_no_files() {
+  local review_file="$LOG_FILE"
+  if [[ -s "$RESULT_PATH" ]]; then
+    review_file="$RESULT_PATH"
+  fi
+  python3 "$SCRIPT_DIR/fresheyes-verdict.py" --no-files-examined "$review_file" 2>/dev/null
 }
 
 # Ask the one home for the run marker whose review this file is.
@@ -1007,7 +1018,7 @@ except Exception:
 # an already-forked python can commit a whole stale record AFTER the terminal
 # write, resurrecting state=running (later misread as died). Never write over
 # a terminal state.
-if record.get("state") in ("complete", "failed", "handle_mismatch"):
+if record.get("state") in ("complete", "failed", "handle_mismatch", "unreviewed"):
     sys.exit(0)
 record["heartbeat_at"] = time.time()
 tmp_path = f"{path}.tmp.hb.{os.getpid()}"
@@ -1145,6 +1156,14 @@ case "$PROVIDER" in
 esac
 
 _stop_heartbeat
+if manual_examined_no_files; then
+  # The text was printed above: it is this run's and says why nothing was read.
+  # No verdict is recorded, so no caller can read a PASSED or FAILED off it.
+  write_status "unreviewed" "7" "" || true
+  FINAL_STATUS_WRITTEN="1"
+  echo "Fresh Eyes: unreviewed — the reviewer examined no files, so this is not a completed review. Re-run it; if it repeats, the reviewer cannot read the repository. Log: $LOG_FILE" >&2
+  exit 7
+fi
 write_status "complete" "0" "$(manual_verdict_from_log 2>/dev/null || true)" || true
 FINAL_STATUS_WRITTEN="1"
 

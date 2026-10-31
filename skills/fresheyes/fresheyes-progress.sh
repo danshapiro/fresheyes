@@ -329,6 +329,15 @@ detect_manual_verdict() {
   python3 "$VERDICT_PARSER" "$review_file" 2>/dev/null
 }
 
+# True when the run's result says it examined no files. The launcher records
+# that as state `unreviewed`; without a readable status.json the poller reads
+# the same result and must reach the same answer.
+result_examined_no_files() {
+  local review_file
+  review_file=$(resolve_result_file "$1")
+  python3 "$VERDICT_PARSER" --no-files-examined "$review_file" 2>/dev/null
+}
+
 print_final_review_if_nonempty() {
   local base="$1"
   local review_file
@@ -501,8 +510,9 @@ if provider_events:
     record["provider_events"] = provider_events
 if last_provider_event:
     record["last_provider_event"] = last_provider_event
-if state == "handle_mismatch":
-    # The result was refused: it must not carry a verdict, from either source.
+if state in ("handle_mismatch", "unreviewed"):
+    # The result was refused, or reviewed nothing: it must not carry a verdict,
+    # from either source. A status.json with no state can still hold one.
     record.pop("verdict", None)
 elif verdict:
     record["verdict"] = verdict
@@ -851,6 +861,7 @@ fi
 
 MESSAGE=""
 STATE_EXIT_CODE=0
+UNREVIEWED_MESSAGE="unreviewed — the reviewer examined no files, so this is not a completed review. --result prints what the reviewer said; re-run the review, and if it repeats, the reviewer cannot read the repository."
 _mismatch_message() {
   local foreign="${1:-}"
   local result_file
@@ -875,6 +886,25 @@ if [[ "$STATUS_STATE" == "handle_mismatch" ]]; then
   RESULT_HANDLE="$STATUS_RESULT_HANDLE"
   WITHHOLD_STDERR=1
   MESSAGE=$(_mismatch_message "$STATUS_RESULT_HANDLE")
+elif [[ "$STATUS_STATE" == "unreviewed" && "$_HANDLE_STATUS" != "6" ]]; then
+  # Recorded by the runner: the review says it examined no files. The text is
+  # this run's and is returned by --result, but it is not a completed review.
+  REVIEW_STATE="unreviewed"
+  STATE_EXIT_CODE=7
+  MESSAGE="$UNREVIEWED_MESSAGE"
+elif [[ "$STATUS_STATE" == "unreviewed" ]]; then
+  REVIEW_STATE="handle_mismatch"
+  STATE_EXIT_CODE=6
+  MESSAGE=$(_mismatch_message "$RESULT_HANDLE")
+elif [[ -z "$STATUS_STATE" && -n "$VERDICT" && "$_HANDLE_STATUS" != "6" ]] && result_examined_no_files "$LOG_FILE"; then
+  # No readable status.json, so the verdict above came from the result itself.
+  # The launcher would have recorded this result as `unreviewed` with no
+  # verdict; a missing or malformed status file must not turn it into a pass.
+  # A finished result with no verdict is caught before `died` below.
+  REVIEW_STATE="unreviewed"
+  STATE_EXIT_CODE=7
+  VERDICT=""
+  MESSAGE="$UNREVIEWED_MESSAGE"
 elif [[ "$STATUS_STATE" == "complete" || -n "$VERDICT" ]]; then
   REVIEW_STATE="complete"
   # The verification above is this script's own, whatever status.json claims:
@@ -916,6 +946,13 @@ elif [[ -z "$STATUS_STATE" && ! -s "$LOG_FILE" && -n "$PID" ]] && ! _owner_alive
 elif [[ -z "$PID" ]]; then
   # Legacy no-handle invocation has no liveness signal; preserve old default.
   REVIEW_STATE="running"
+elif [[ -z "$STATUS_STATE" && "$_HANDLE_STATUS" != "6" ]] && result_examined_no_files "$LOG_FILE"; then
+  # The run is over and left no readable status.json or verdict. The launcher
+  # checks for no files whether or not there is a verdict, so this is its
+  # `unreviewed`, and --result prints the reviewer's explanation.
+  REVIEW_STATE="unreviewed"
+  STATE_EXIT_CODE=7
+  MESSAGE="$UNREVIEWED_MESSAGE"
 else
   REVIEW_STATE="died"
   STATE_EXIT_CODE=4
@@ -939,12 +976,23 @@ if [[ "$OUTPUT_MODE" == "result" ]]; then
     print_failure_diagnostic "$LOG_FILE" "$WITHHOLD_STDERR"
     exit "$STATE_EXIT_CODE"
   fi
+  if [[ "$REVIEW_STATE" == "unreviewed" ]]; then
+    print_final_review_if_nonempty "$LOG_FILE" || true
+    printf 'Fresh Eyes: %s\n' "$MESSAGE" >&2
+    exit "$STATE_EXIT_CODE"
+  fi
   print_result_or_pending "$REVIEW_STATE" "$LOG_FILE"
   exit $?
 fi
 
 if [[ "$REVIEW_STATE" == "handle_mismatch" ]]; then
   print_mismatch_diagnostic "$LOG_FILE"
+  exit "$STATE_EXIT_CODE"
+fi
+
+if [[ "$REVIEW_STATE" == "unreviewed" ]]; then
+  print_final_review_if_nonempty "$LOG_FILE" || true
+  printf 'Fresh Eyes: %s\n' "$MESSAGE" >&2
   exit "$STATE_EXIT_CODE"
 fi
 

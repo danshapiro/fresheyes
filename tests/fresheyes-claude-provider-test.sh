@@ -111,6 +111,21 @@ if mode == "automatic":
         "result": "Done.",
         "structured_output": {"approve_commit": True, "issues": [], "run_handle": run_handle},
     })
+elif os.environ.get("FRESHEYES_FAKE_EXAMINED_NONE") == "1":
+    emit({
+        "type": "result",
+        "subtype": "success",
+        "is_error": False,
+        "result": (
+            "## Files Examined\n\n"
+            "None. Every read failed.\n\n"
+            "## Issues Found\n\n"
+            "- **critical** review unavailable: nothing could be read.\n\n"
+            "---\n"
+            "**INDEPENDENT CODE REVIEW FAILED**\n"
+            "FRESHEYES-RUN: %s" % run_handle
+        ),
+    })
 else:
     emit({
         "type": "result",
@@ -789,8 +804,40 @@ if "--ignore-user-config" in argv:
 PY
 }
 
+test_manual_review_that_examined_no_files_exits_7() {
+  local run_tmp stdout_file stderr_file status log_file
+  run_tmp="$(mktemp -d "$TEST_TMP/unreviewed.XXXXXX")"
+  stdout_file="$run_tmp/stdout.txt"
+  stderr_file="$run_tmp/stderr.txt"
+  rm -f "$ARGV_FILE" "$ARGV_FILE.env"
+
+  set +e
+  TMPDIR="$run_tmp" \
+    FRESHEYES_LOG_DIR="$run_tmp/fresheyes-logs" \
+    FRESHEYES_GLOBAL_LOG_DIR="$run_tmp/global-fresheyes-logs" \
+    FRESHEYES_CLAUDE_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_REASONING= \
+    FRESHEYES_FAKE_EXAMINED_NONE=1 \
+    PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$ARGV_FILE" \
+    timeout 30s bash "$RUNNER" --foreground --claude "Review README.md." > "$stdout_file" 2> "$stderr_file"
+  status=$?
+  set -e
+
+  [[ "$status" == "7" ]] || fail "a Claude review that examined no files exited $status, not 7: $(cat "$stderr_file")"
+  assert_contains "$(cat "$stdout_file")" "review unavailable" "unreviewed Claude output"
+  assert_contains "$(cat "$stderr_file")" "unreviewed" "unreviewed Claude stderr"
+  log_file=$(read_latest_file "$run_tmp" 'fresheyes-*.log')
+  assert_contains "$(cat "$log_file.status.json")" '"state":"unreviewed"' "unreviewed Claude status"
+  if [[ "$(cat "$log_file.status.json")" == *'"verdict"'* ]]; then
+    fail "an unreviewed Claude run recorded a verdict: $(cat "$log_file.status.json")"
+  fi
+}
+
 make_fake_claude
 test_manual_claude_invocation_uses_streaming_flags
+test_manual_review_that_examined_no_files_exits_7
 test_automatic_claude_extracts_structured_output
 test_default_log_dir_uses_global_log_dir
 test_parser_missing_result_writes_failure_log

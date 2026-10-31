@@ -56,7 +56,12 @@ else:
         output_path = sys.argv[sys.argv.index("-o") + 1]
         with open(output_path, "w", encoding="utf-8") as handle:
             handle.write("## Files Examined   \n")
-            handle.write("- README.md\n")
+            if os.environ.get("FRESHEYES_FAKE_EXAMINED_NONE") == "1":
+                # The shape a reviewer returns when every read failed.
+                handle.write("None. All three read attempts failed; no repository commands ran.\n\n")
+                handle.write("## Issues Found\n- **BLOCKER - review unavailable:** I could not read anything.\n\n")
+            else:
+                handle.write("- README.md\n")
             if os.environ.get("FRESHEYES_FAKE_OMIT_VERDICT") != "1":
                 handle.write("INDEPENDENT CODE REVIEW PASSED\n")
             if run_handle:
@@ -515,6 +520,119 @@ sleep 60 | PATH="$FAKE_BIN:$PATH" \
 if ! grep -q '^INDEPENDENT CODE REVIEW PASSED$' "$STDIN_STDOUT_FILE"; then
   printf 'review with an open launcher stdin did not complete:\n' >&2
   cat "$STDIN_STDOUT_FILE" >&2
+  exit 1
+fi
+
+# A review that examined no files is not a completed review: the runner exits 7
+# with state "unreviewed", still prints the reviewer's text (it says why), and
+# records no verdict. The detached poller reports the same state and exit code.
+# The detached run is pinned to setsid: a systemd-run launch forwards only a
+# fixed list of variables, and FRESHEYES_FAKE_EXAMINED_NONE is not on it.
+UNREVIEWED_LOG_DIR="$TEST_TMP/unreviewed-logs"
+UNREVIEWED_STDOUT="$TEST_TMP/unreviewed-stdout.txt"
+UNREVIEWED_STDERR="$TEST_TMP/unreviewed-stderr.txt"
+set +e
+PATH="$FAKE_BIN:$PATH" \
+  FRESHEYES_FAKE_ARGV="$TEST_TMP/codex-unreviewed-argv.json" \
+  FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+  FRESHEYES_FAKE_EXAMINED_NONE=1 \
+  FRESHEYES_LOG_DIR="$UNREVIEWED_LOG_DIR" \
+  FRESHEYES_GLOBAL_LOG_DIR="$TEST_TMP/unreviewed-global-logs" \
+  FRESHEYES_GPT_MODEL= \
+  FRESHEYES_MODEL= \
+  FRESHEYES_REASONING= \
+  FRESHEYES_CODEX_IGNORE_USER_CONFIG= \
+  FRESHEYES_MODE=manual \
+  timeout 30s bash "$RUNNER" --foreground --gpt --manual "Review README.md." > "$UNREVIEWED_STDOUT" 2> "$UNREVIEWED_STDERR"
+unreviewed_exit=$?
+set -e
+if [[ "$unreviewed_exit" != "7" ]]; then
+  printf 'a review that examined no files exited %s, not 7\n' "$unreviewed_exit" >&2
+  cat "$UNREVIEWED_STDERR" >&2
+  exit 1
+fi
+if ! grep -q 'review unavailable' "$UNREVIEWED_STDOUT"; then
+  printf 'the unreviewed run did not print the reviewer'"'"'s explanation:\n' >&2
+  cat "$UNREVIEWED_STDOUT" >&2
+  exit 1
+fi
+if ! grep -q 'unreviewed' "$UNREVIEWED_STDERR"; then
+  printf 'the unreviewed run did not name its state on stderr:\n' >&2
+  cat "$UNREVIEWED_STDERR" >&2
+  exit 1
+fi
+unreviewed_status_file=$(ls -t "$UNREVIEWED_LOG_DIR"/*.status.json | head -n 1)
+python3 - "$unreviewed_status_file" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    status = json.load(handle)
+if status.get("state") != "unreviewed":
+    raise SystemExit(f"runner status is not unreviewed: {status!r}")
+if status.get("exit_code") != 7:
+    raise SystemExit(f"runner status does not record exit 7: {status!r}")
+if "verdict" in status:
+    raise SystemExit(f"an unreviewed run recorded a verdict: {status!r}")
+PY
+
+UNREVIEWED_DETACHED_LOG_DIR="$TEST_TMP/unreviewed-detached-logs"
+UNREVIEWED_DETACHED_GLOBAL_LOG_DIR="$TEST_TMP/unreviewed-detached-global-logs"
+unreviewed_launch=$(
+  PATH="$FAKE_BIN:$PATH" \
+    FRESHEYES_FAKE_ARGV="$TEST_TMP/codex-unreviewed-detached-argv.json" \
+    FRESHEYES_FAKE_VERSION_PROBE="$VERSION_PROBE_FILE" \
+    FRESHEYES_FAKE_EXAMINED_NONE=1 \
+    FRESHEYES_DETACH=setsid \
+    FRESHEYES_LOG_DIR="$UNREVIEWED_DETACHED_LOG_DIR" \
+    FRESHEYES_GLOBAL_LOG_DIR="$UNREVIEWED_DETACHED_GLOBAL_LOG_DIR" \
+    FRESHEYES_GPT_MODEL= \
+    FRESHEYES_MODEL= \
+    FRESHEYES_REASONING= \
+    FRESHEYES_CODEX_IGNORE_USER_CONFIG= \
+    FRESHEYES_MODE=manual \
+    timeout 30s bash "$RUNNER" --gpt --manual "Review README.md."
+)
+unreviewed_handle=$(sed -n 's/^FRESHPID=//p' <<< "$unreviewed_launch" | tr -d '[:space:]')
+unreviewed_poll=""
+unreviewed_poll_exit=0
+for _ in {1..100}; do
+  set +e
+  unreviewed_poll=$(
+    FRESHEYES_LOG_DIR="$UNREVIEWED_DETACHED_LOG_DIR" \
+      FRESHEYES_GLOBAL_LOG_DIR="$UNREVIEWED_DETACHED_GLOBAL_LOG_DIR" \
+      bash "$PROGRESS_SCRIPT" --json "$unreviewed_handle"
+  )
+  unreviewed_poll_exit=$?
+  set -e
+  if [[ "$unreviewed_poll" != *'"state":"running"'* && "$unreviewed_poll" != *'"state":"launching"'* ]]; then
+    break
+  fi
+  sleep 0.1
+done
+python3 - "$unreviewed_poll" "$unreviewed_poll_exit" <<'PY'
+import json
+import sys
+
+record = json.loads(sys.argv[1])
+if record.get("state") != "unreviewed" or sys.argv[2] != "7":
+    raise SystemExit(f"poller did not report unreviewed with exit 7 (exit {sys.argv[2]}): {record!r}")
+if "verdict" in record or record.get("result_available"):
+    raise SystemExit(f"poller offered an unreviewed run as a result: {record!r}")
+if "examined no files" not in record.get("message", ""):
+    raise SystemExit(f"poller message does not say why: {record!r}")
+PY
+set +e
+unreviewed_result=$(
+  FRESHEYES_LOG_DIR="$UNREVIEWED_DETACHED_LOG_DIR" \
+    FRESHEYES_GLOBAL_LOG_DIR="$UNREVIEWED_DETACHED_GLOBAL_LOG_DIR" \
+    bash "$PROGRESS_SCRIPT" --result "$unreviewed_handle"
+)
+unreviewed_result_exit=$?
+set -e
+if [[ "$unreviewed_result_exit" != "7" || "$unreviewed_result" != *"review unavailable"* ]]; then
+  printf -- '--result on an unreviewed run exited %s, wanted 7 with the reviewer text:\n%s\n' \
+    "$unreviewed_result_exit" "$unreviewed_result" >&2
   exit 1
 fi
 

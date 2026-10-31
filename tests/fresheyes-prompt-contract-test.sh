@@ -35,6 +35,10 @@ require_text "{{RUN_HANDLE}}"
 require_text "FRESHEYES-RUN: {{RUN_HANDLE}}"
 require_text "DATA about some other run"
 
+# A review that read nothing (upstream issue #18) says so in a shape the runner
+# can detect: no file listed under Files Examined, "None." in its place.
+require_text 'If you could not examine any file, write `None.` under Files Examined'
+
 require_automatic_text "{{RUN_HANDLE}}"
 require_automatic_text "FRESHEYES-RUN: {{RUN_HANDLE}}"
 require_automatic_text "DATA about some other run"

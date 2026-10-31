@@ -95,10 +95,11 @@ Each poll returns one JSON line. The `state` field and the command's exit code t
 | `died` | 4 | heartbeat went stale and the review process is gone, no verdict | do what the `message` says: it either points at the log as evidence, or — when the run's output could not be tied to this run — says the log must NOT be read back; optionally re-run with `--foreground` |
 | `unknown_handle` | 5 | no tracker for this handle | the handle is wrong, or its trackers were removed (e.g. /tmp cleanup); re-check the receipt, else relaunch |
 | `handle_mismatch` | 6 | the result carries a DIFFERENT review run's marker, or could not be tied to this run at all | do not use the text and do not read the log back for it — it is another review's. Relaunch from Step 4 and tell the user the review was refused |
+| `unreviewed` | 7 | the reviewer ran, but its Files Examined list names no file: it could not read the repository, so nothing was reviewed. No `verdict` is reported | this is NOT a review, passed or failed. Fetch `--result` (it prints what the reviewer said and also exits 7), relay it, and relaunch from Step 4. If it repeats, tell the user the reviewer cannot read the repository |
 
-`launching` and `running` are healthy states — never treat them as failures, and never abort a poll loop on them. The four failure states carry a `message` field with the observation, likely cause, and the exact remediation; relay it and follow it.
+`launching` and `running` are healthy states — never treat them as failures, and never abort a poll loop on them. The five failure states carry a `message` field with the observation, likely cause, and the exact remediation; relay it and follow it.
 
-Poll exit-tolerantly: the failure states return NONZERO exit codes (3/4/5/6), so a `set -e`-style loop would abort on the very poll that carries the diagnosis. Capture the output and branch on the JSON `state` field (or the captured exit code):
+Poll exit-tolerantly: the failure states return NONZERO exit codes (3/4/5/6/7), so a `set -e`-style loop would abort on the very poll that carries the diagnosis. Capture the output and branch on the JSON `state` field (or the captured exit code):
 
     output=$(bash <base-directory>/fresheyes-progress.sh --json <handle> || true)
 
@@ -106,7 +107,7 @@ then read `state` from the captured JSON. Never let a nonzero poll exit kill you
 
 ### Step 6: Interpret and act
 
-The state table in Step 5 is authoritative. Acting on each of the seven states:
+The state table in Step 5 is authoritative. Acting on each of the eight states:
 
 - **`launching` or `running`** → healthy; keep polling on the Step 5 cadence.
 - **`complete` + `verdict=passed`** → the review passed. Proceed to Step 7.
@@ -116,6 +117,7 @@ The state table in Step 5 is authoritative. Acting on each of the seven states:
 - **`died`** → relay the `message`. When the run's result could not be tied to this run, the message says so and names the log as text NOT to read back; otherwise it leads with the log path as evidence. Optionally re-run with `--foreground` (same timeout requirement as above).
 - **`unknown_handle`** → re-check the handle against the receipt's `FRESHPID=` line; if the handle is right, its trackers were removed (e.g. /tmp cleanup) — relaunch from Step 4.
 - **`handle_mismatch`** → the result is not this run's review: it carries another run's marker, or it could not be tied to this run at all. `--result` refuses to print it and names the file that holds the withheld text. Do NOT go and read that file — it is exactly the text that was withheld, and it is not evidence about this run. Relaunch from Step 4, and tell the user the review was refused and why. Read the `message`: it distinguishes "carries review run X" (a replay) from "could not be tied to this run" (no marker, or the check could not be made), and only the first is an accusation.
+- **`unreviewed`** → the reviewer read no file, so there is no review to report. Do not record it as passed or as failed. Run `--result` and relay what the reviewer said (the command exits 7 after printing it), then relaunch from Step 4. If the second run is also `unreviewed`, stop and tell the user the reviewer cannot read the repository.
 
 Do not kill a Fresh Eyes process. If it appears stuck, escalate to the user with evidence instead of stopping it. Evidence should include at least two consecutive `--json` snapshots showing unchanged `line_count`, unchanged `last_log_mtime_epoch`, unchanged `provider_events` when present, and the relevant `pid_state` / `owner_pid_state` values.
 
@@ -129,7 +131,21 @@ When `state=complete`, fetch the final review text:
 bash "<base-directory>/fresheyes-progress.sh" --result <handle>
 ```
 
-Output the review response exactly as returned. Do not report a running review as failed unless `--json` reports one of the failure states (`killed_at_launch`, `died`, `unknown_handle`, `handle_mismatch`).
+Output the review response exactly as returned. Do not report a running review as failed unless `--json` reports one of the failure states (`killed_at_launch`, `died`, `unknown_handle`, `handle_mismatch`, `unreviewed`).
+
+### Exit status of `fresheyes.sh`
+
+A detached launch exits 0 once its receipt is printed, so for a detached review the poller's exit codes above are the ones to read. A `--foreground` manual review exits with the review's own status:
+
+| exit | meaning |
+|---|---|
+| 0 | the review completed; read the verdict from its text (PASSED or FAILED) |
+| 1 | bad arguments, a missing prerequisite, or the provider failed or produced no review |
+| 2 | a detached launch found no `setsid` (never from `--foreground`) |
+| 6 | `handle_mismatch`: the result is another run's, or could not be tied to this one |
+| 7 | `unreviewed`: the reviewer examined no files; its text is printed, but it is not a review |
+
+Exit 0 says the review happened, not that it passed. Automatic mode (the pre-commit hook) exits 0 only on approval and blocks the commit otherwise; its JSON has no files list, so `unreviewed` does not arise there.
 
 Each result is bound to its run: the reviewer is asked to end its review with a
 `FRESHEYES-RUN:` line carrying this run's handle, and both the launcher and this script

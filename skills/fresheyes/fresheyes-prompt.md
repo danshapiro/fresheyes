@@ -106,7 +106,7 @@ List all files you examined, then report your findings:
 
 ```
 ## Files Examined
-- [list each file you read/examined]
+- [list each file you read/examined, one per line]
 
 ## Issues Found
 [For each issue:]
@@ -119,6 +119,8 @@ List all files you examined, then report your findings:
 **INDEPENDENT CODE REVIEW [PASSED/FAILED]**
 FRESHEYES-RUN: {{RUN_HANDLE}}
 ```
+
+If you could not examine any file, write `None.` under Files Examined, followed by why, list no file there, and mark the review **FAILED**. A review that lists no file is reported to the caller as not performed, whatever its verdict.
 
 Use **PASSED** if no blocking issues found (only cosmetic/nit issues or no issues). When you mark a review **PASSED**, add a short note that if the invoking agent was instructed to iterate with Fresh Eyes, it should stop iterating because only minor/nit issues remain; Fresh Eyes may keep finding small improvements if asked to continue, so the goal is not to iterate until there is nothing left.
 Use **FAILED** if any blocking issues exist. Anything that isn't cosmetic or a nit is blocking.
